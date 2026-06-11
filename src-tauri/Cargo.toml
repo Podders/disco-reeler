@@ -1,6 +1,6 @@
 [package]
 name = "vinyl-reel-recorder"
-version = "0.1.1"
+version = "0.1.2"
 description = "Vinyl Reel Recorder"
 authors = ["Steve Podmore"]
 edition = "2021"
