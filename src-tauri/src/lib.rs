@@ -193,12 +193,13 @@ fn decode_data_url(data_url: &str) -> Result<(Vec<u8>, Option<String>), String> 
         return Err("Expected a data URL.".to_string());
     }
 
-    let comma_index = trimmed
-        .find(',')
-        .ok_or_else(|| "The data URL is missing its payload.".to_string())?;
+    let base64_marker = ";base64,";
+    let marker_index = trimmed
+        .find(base64_marker)
+        .ok_or_else(|| "The data URL is missing its base64 payload marker.".to_string())?;
 
-    let metadata = &trimmed[5..comma_index];
-    let payload = &trimmed[comma_index + 1..];
+    let metadata = &trimmed[5..marker_index];
+    let payload = &trimmed[marker_index + base64_marker.len()..];
     let mime = metadata
         .split(';')
         .next()
@@ -211,6 +212,19 @@ fn decode_data_url(data_url: &str) -> Result<(Vec<u8>, Option<String>), String> 
         .map_err(|error| format!("Failed to decode data URL payload: {error}"))?;
 
     Ok((bytes, mime))
+}
+
+fn decode_base64_input(input: &str) -> Result<Vec<u8>, String> {
+    let trimmed = input.trim();
+
+    if trimmed.starts_with("data:") {
+        let (bytes, _) = decode_data_url(trimmed)?;
+        return Ok(bytes);
+    }
+
+    base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .map_err(|error| format!("Failed to decode recording data: {error}"))
 }
 
 fn extension_for_mime(mime: Option<&str>) -> &'static str {
@@ -497,9 +511,7 @@ async fn save_recording_file(file_name: String, base64_data: String) -> Result<S
     let file_name = sanitize_file_name(&file_name);
     let target_path = target_dir.join(file_name);
 
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(base64_data.trim())
-        .map_err(|error| format!("Failed to decode recording data: {error}"))?;
+    let bytes = decode_base64_input(&base64_data)?;
 
     fs::write(&target_path, bytes)
         .map_err(|error| format!("Failed to write recording file: {error}"))?;
@@ -529,9 +541,7 @@ async fn encode_recording_with_ffmpeg(
     output_height: u32,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(base64_data.trim())
-            .map_err(|error| format!("Failed to decode recording data: {error}"))?;
+        let bytes = decode_base64_input(&base64_data)?;
 
         let temp_dir = temp_recording_dir();
         fs::create_dir_all(&temp_dir)
@@ -621,19 +631,28 @@ async fn encode_recording_with_ffmpeg(
             .arg(filter_complex)
             .arg("-map")
             .arg("[v]")
+            .arg("-map")
+            .arg("0:a?")
             .arg("-shortest")
-            .arg("-an")
             .arg("-c:v")
             .arg("libx264")
             .arg("-preset")
             .arg("veryfast")
             .arg("-crf")
             .arg("18")
+            .arg("-c:a")
+            .arg("aac")
+            .arg("-ac")
+            .arg("2")
+            .arg("-ar")
+            .arg("48000")
+            .arg("-b:a")
+            .arg("192k")
             .arg("-movflags")
             .arg("+faststart")
             .arg(&output_path);
 
-        let ffmpeg_status = command.status();
+        let ffmpeg_output = command.output();
 
         let cleanup_result = fs::remove_file(&input_path);
 
@@ -648,8 +667,8 @@ async fn encode_recording_with_ffmpeg(
             return Err(format!("Failed to clean up temporary recording: {error}"));
         }
 
-        let status = match ffmpeg_status {
-            Ok(status) => status,
+        let output = match ffmpeg_output {
+            Ok(output) => output,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if let Some(path) = artwork_path.as_ref() {
                     let _ = fs::remove_file(path);
@@ -671,7 +690,11 @@ async fn encode_recording_with_ffmpeg(
             }
         };
 
-        if !status.success() {
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr)
+                .trim()
+                .to_string();
+
             if output_path.exists() {
                 let _ = fs::remove_file(&output_path);
             }
@@ -679,7 +702,16 @@ async fn encode_recording_with_ffmpeg(
                 let _ = fs::remove_file(path);
             }
 
-            return Err("FFmpeg failed to encode the recording.".to_string());
+            let details = if stderr.is_empty() {
+                format!(
+                    "FFmpeg failed to encode the recording (exit code {}).",
+                    output.status.code().map(|code| code.to_string()).unwrap_or_else(|| "unknown".to_string())
+                )
+            } else {
+                format!("FFmpeg failed to encode the recording: {stderr}")
+            };
+
+            return Err(details);
         }
 
         if let Some(path) = artwork_path.as_ref() {

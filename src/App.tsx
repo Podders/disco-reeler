@@ -1,9 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Listbox,
+  ListboxButton,
+  ListboxOption,
+  ListboxOptions,
+} from "@headlessui/react";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 type DurationChoice = 15 | 30 | 60 | 90;
 type CameraStatus = "idle" | "loading" | "ready" | "no-device" | "error";
+type AudioStatus = CameraStatus;
 type RecordingStatus = "idle" | "countdown" | "recording" | "saving" | "error" | "saved";
 type OutputPresetId = "vertical" | "square" | "landscape";
 
@@ -70,6 +77,84 @@ const durationOptions: Array<{ label: string; value: DurationChoice; note: strin
   { label: "90s", value: 90, note: "Long take" },
 ];
 
+type DropdownItem = {
+  value: string;
+  label: string;
+  description?: string;
+};
+
+function DropdownListbox({
+  items,
+  value,
+  onChange,
+  placeholder,
+  className,
+}: {
+  items: DropdownItem[];
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  className?: string;
+}) {
+  const selectedItem = items.find((item) => item.value === value) ?? null;
+
+  return (
+    <Listbox value={value} onChange={onChange}>
+      <div className={["relative", className ?? ""].join(" ").trim()}>
+        <ListboxButton className="flex w-full items-center justify-between gap-3 rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-left text-sm text-slate-100 outline-none transition hover:border-white/20 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/20">
+          <span className="min-w-0">
+            <span className="block truncate">
+              {selectedItem ? selectedItem.label : placeholder}
+            </span>
+            {selectedItem?.description ? (
+              <span className="mt-0.5 block text-[11px] text-slate-400">
+                {selectedItem.description}
+              </span>
+            ) : null}
+          </span>
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 20 20"
+            className="h-4 w-4 shrink-0 text-slate-400"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="m6 8 4 4 4-4" />
+          </svg>
+        </ListboxButton>
+
+        <ListboxOptions className="absolute z-50 mt-2 max-h-72 w-full overflow-auto rounded-2xl border border-white/10 bg-slate-950 p-1 shadow-2xl shadow-black/50 focus:outline-none">
+          {items.length > 0 ? (
+            items.map((item) => (
+              <ListboxOption
+                key={item.value}
+                value={item.value}
+                className={({ active, selected }) =>
+                  [
+                    "cursor-pointer rounded-xl px-3 py-2 text-left outline-none transition",
+                    active ? "bg-white/10 text-white" : "text-slate-200",
+                    selected ? "bg-amber-400/10" : "",
+                  ].join(" ")
+                }
+              >
+                <span className="block truncate text-sm font-medium">{item.label}</span>
+                {item.description ? (
+                  <span className="mt-0.5 block text-[11px] text-slate-400">{item.description}</span>
+                ) : null}
+              </ListboxOption>
+            ))
+          ) : (
+            <div className="px-3 py-2 text-sm text-slate-500">{placeholder}</div>
+          )}
+        </ListboxOptions>
+      </div>
+    </Listbox>
+  );
+}
+
 function stopStream(stream: MediaStream | null) {
   stream?.getTracks().forEach((track) => track.stop());
 }
@@ -92,6 +177,10 @@ function loadStoredValue(key: string) {
 
 function cameraLabel(device: MediaDeviceInfo, index: number) {
   return device.label.trim() || `Camera ${index + 1}`;
+}
+
+function audioLabel(device: MediaDeviceInfo, index: number) {
+  return device.label.trim() || `Microphone ${index + 1}`;
 }
 
 function friendlyCameraError(error: unknown) {
@@ -156,8 +245,9 @@ async function blobToBase64(blob: Blob) {
         return;
       }
 
-      const commaIndex = reader.result.indexOf(",");
-      resolve(commaIndex >= 0 ? reader.result.slice(commaIndex + 1) : reader.result);
+      const base64Marker = ";base64,";
+      const markerIndex = reader.result.indexOf(base64Marker);
+      resolve(markerIndex >= 0 ? reader.result.slice(markerIndex + base64Marker.length) : reader.result);
     };
     reader.onerror = () => reject(reader.error ?? new Error("Failed to read recording data."));
     reader.readAsDataURL(blob);
@@ -187,6 +277,19 @@ function App() {
   const recordingStartedAtRef = useRef<number | null>(null);
   const recordingChunksRef = useRef<BlobPart[]>([]);
   const recordingPreviewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const settingsCameraPreviewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const audioMeterStreamRef = useRef<MediaStream | null>(null);
+  const audioMeterAudioContextRef = useRef<AudioContext | null>(null);
+  const audioMeterAnimationFrameRef = useRef<number | null>(null);
+  const audioMeterLevelsRef = useRef({ left: 0, right: 0 });
+  const audioMeterLeftBarRef = useRef<HTMLDivElement | null>(null);
+  const audioMeterRightBarRef = useRef<HTMLDivElement | null>(null);
+  const audioMeterLeftGreenRef = useRef<HTMLDivElement | null>(null);
+  const audioMeterLeftRedRef = useRef<HTMLDivElement | null>(null);
+  const audioMeterRightGreenRef = useRef<HTMLDivElement | null>(null);
+  const audioMeterRightRedRef = useRef<HTMLDivElement | null>(null);
+  const recordSpectrumCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const recordControlAnchorRef = useRef<HTMLDivElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const dragStateRef = useRef<{
     pointerId: number;
@@ -198,13 +301,24 @@ function App() {
   const viewportRef = useRef<HTMLDivElement | null>(null);
 
   const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
-  const [selectedCameraId, setSelectedCameraId] = useState("");
+  const [selectedCameraId, setSelectedCameraId] = useState(() =>
+    loadStoredValue("vinyl-reel-recorder.camera.device"),
+  );
   const [cameraStatus, setCameraStatus] = useState<CameraStatus>("idle");
   const [cameraMessage, setCameraMessage] = useState(
     "Pick a webcam and the portrait preview will update here.",
   );
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [cameraRefreshTick, setCameraRefreshTick] = useState(0);
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedAudioDeviceId, setSelectedAudioDeviceId] = useState(() =>
+    loadStoredValue("vinyl-reel-recorder.audio.device"),
+  );
+  const [audioStatus, setAudioStatus] = useState<AudioStatus>("idle");
+  const [audioMessage, setAudioMessage] = useState(
+    "Pick a microphone and the recorder will capture it with the clip.",
+  );
+  const [audioError, setAudioError] = useState<string | null>(null);
+  const [deviceRefreshTick, setDeviceRefreshTick] = useState(0);
   const [cameraZoom, setCameraZoom] = useState(1.15);
   const [cameraPan, setCameraPan] = useState({ x: 0, y: 0 });
   const [isCameraViewportHovered, setIsCameraViewportHovered] = useState(false);
@@ -248,6 +362,7 @@ function App() {
     "Connect your Discogs token to browse releases from your collection.",
   );
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<"camera" | "audio" | "discogs">("camera");
   const [outputPresetId, setOutputPresetId] = useState<OutputPresetId>("vertical");
   const discogsCacheLoadedForUserRef = useRef<string | null>(null);
 
@@ -260,6 +375,20 @@ function App() {
     const index = cameraDevices.indexOf(match);
     return cameraLabel(match, index);
   }, [cameraDevices, selectedCameraId]);
+
+  const activeAudioLabel = useMemo(() => {
+    if (!selectedAudioDeviceId) {
+      return "Default microphone";
+    }
+
+    const match = audioDevices.find((device) => device.deviceId === selectedAudioDeviceId);
+    if (!match) {
+      return "Default microphone";
+    }
+
+    const index = audioDevices.indexOf(match);
+    return audioLabel(match, index);
+  }, [audioDevices, selectedAudioDeviceId]);
 
   const resetCameraFraming = () => {
     setCameraZoom(1.15);
@@ -348,6 +477,48 @@ function App() {
     setRecordingElapsedSeconds(0);
   };
 
+  const stopRecordingCaptureStream = () => {
+    recordingCaptureStreamRef.current?.getTracks().forEach((track) => track.stop());
+    recordingCaptureStreamRef.current = null;
+  };
+
+  const stopAudioMeter = () => {
+    if (audioMeterAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(audioMeterAnimationFrameRef.current);
+      audioMeterAnimationFrameRef.current = null;
+    }
+
+    audioMeterStreamRef.current?.getTracks().forEach((track) => track.stop());
+    audioMeterStreamRef.current = null;
+
+    if (audioMeterAudioContextRef.current) {
+      void audioMeterAudioContextRef.current.close();
+      audioMeterAudioContextRef.current = null;
+    }
+
+    audioMeterLevelsRef.current = { left: 0, right: 0 };
+    applyMeterBar(
+      audioMeterLeftBarRef.current,
+      audioMeterLeftGreenRef.current,
+      audioMeterLeftRedRef.current,
+      0,
+      false,
+    );
+    applyMeterBar(
+      audioMeterRightBarRef.current,
+      audioMeterRightGreenRef.current,
+      audioMeterRightRedRef.current,
+      0,
+      false,
+    );
+
+    const spectrumCanvas = recordSpectrumCanvasRef.current;
+    const spectrumContext = spectrumCanvas?.getContext("2d");
+    if (spectrumCanvas && spectrumContext) {
+      spectrumContext.clearRect(0, 0, spectrumCanvas.width, spectrumCanvas.height);
+    }
+  };
+
   const replaceStream = async (stream: MediaStream) => {
     stopStream(streamRef.current);
     streamRef.current = stream;
@@ -383,7 +554,7 @@ function App() {
         audio: false,
       });
       stopStream(probe);
-      setCameraRefreshTick((value) => value + 1);
+      setDeviceRefreshTick((value) => value + 1);
       setCameraMessage("Camera permission granted. Loading the selected webcam.");
     } catch (error) {
       const message = friendlyCameraError(error);
@@ -400,6 +571,39 @@ function App() {
     }
   };
 
+  const requestAudioAccess = async () => {
+    setAudioError(null);
+    setAudioStatus("loading");
+    setAudioMessage("Requesting microphone access...");
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setAudioStatus("error");
+      setAudioMessage("This runtime does not expose browser audio APIs.");
+      setAudioError("navigator.mediaDevices.getUserMedia is unavailable.");
+      return;
+    }
+
+    try {
+      const probe = await navigator.mediaDevices.getUserMedia({
+        video: false,
+        audio: {
+          channelCount: { ideal: 2 },
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+        },
+      });
+      stopStream(probe);
+      setDeviceRefreshTick((value) => value + 1);
+      setAudioMessage("Microphone permission granted. Loading the selected input.");
+      } catch (error) {
+      const message = friendlyCameraError(error);
+      setAudioStatus("error");
+      setAudioMessage(message);
+      setAudioError(message);
+    }
+  };
+
   useEffect(() => {
     let active = true;
 
@@ -412,17 +616,22 @@ function App() {
       }
 
       try {
-        const devices = (await navigator.mediaDevices.enumerateDevices()).filter(
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(
           (device): device is MediaDeviceInfo => device.kind === "videoinput",
+        );
+        const audioInputs = devices.filter(
+          (device): device is MediaDeviceInfo => device.kind === "audioinput",
         );
 
         if (!active) {
           return;
         }
 
-        setCameraDevices(devices);
+        setCameraDevices(videoDevices);
+        setAudioDevices(audioInputs);
 
-        if (devices.length === 0) {
+        if (videoDevices.length === 0) {
           setCameraStatus("no-device");
           setCameraMessage(
             "No webcam was detected. Connect one or enable permission, then refresh the list.",
@@ -432,14 +641,32 @@ function App() {
           return;
         }
 
+        if (audioInputs.length === 0) {
+          setAudioStatus("no-device");
+          setAudioMessage(
+            "No microphone was detected. Connect one or enable permission, then refresh the list.",
+          );
+          setSelectedAudioDeviceId("");
+        } else {
+          setAudioError(null);
+          setAudioStatus((current) => (current === "error" ? "idle" : "ready"));
+          setSelectedAudioDeviceId((current) => {
+            if (current && audioInputs.some((device) => device.deviceId === current)) {
+              return current;
+            }
+
+            return "";
+          });
+        }
+
         setCameraError(null);
         setCameraStatus((current) => (current === "error" ? "idle" : current));
         setSelectedCameraId((current) => {
-          if (current && devices.some((device) => device.deviceId === current)) {
+          if (current && videoDevices.some((device) => device.deviceId === current)) {
             return current;
           }
 
-          return devices[0]?.deviceId ?? "";
+          return videoDevices[0]?.deviceId ?? "";
         });
       } catch (error) {
         if (!active) {
@@ -456,7 +683,7 @@ function App() {
     void refreshDevices();
 
     const handleDeviceChange = () => {
-      setCameraRefreshTick((value) => value + 1);
+      setDeviceRefreshTick((value: number) => value + 1);
     };
 
     navigator.mediaDevices?.addEventListener("devicechange", handleDeviceChange);
@@ -465,7 +692,7 @@ function App() {
       active = false;
       navigator.mediaDevices?.removeEventListener("devicechange", handleDeviceChange);
     };
-  }, [cameraRefreshTick]);
+  }, [deviceRefreshTick]);
 
   useEffect(() => {
     let cancelled = false;
@@ -552,6 +779,39 @@ function App() {
   }, [cameraDevices.length, selectedCameraId]);
 
   useEffect(() => {
+    if (!isSettingsOpen || settingsTab !== "camera") {
+      const video = settingsCameraPreviewVideoRef.current;
+      if (video) {
+        video.pause();
+        video.srcObject = null;
+      }
+
+      return undefined;
+    }
+
+    const video = settingsCameraPreviewVideoRef.current;
+    if (!video) {
+      return undefined;
+    }
+
+    video.srcObject = streamRef.current;
+    video.muted = true;
+
+    if (streamRef.current) {
+      void video.play().catch(() => {
+        // The preview updates once the stream is attached.
+      });
+    }
+
+    return () => {
+      if (video.srcObject === streamRef.current) {
+        video.pause();
+        video.srcObject = null;
+      }
+    };
+  }, [isSettingsOpen, settingsTab, selectedCameraId, cameraStatus]);
+
+  useEffect(() => {
     return () => {
       stopStream(streamRef.current);
       streamRef.current = null;
@@ -562,6 +822,199 @@ function App() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (audioStatus !== "ready") {
+      stopAudioMeter();
+      return undefined;
+    }
+
+    if (
+      recordingStatus === "countdown" ||
+      recordingStatus === "recording" ||
+      recordingStatus === "saving"
+    ) {
+      stopAudioMeter();
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const startMeter = async () => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        return;
+      }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: false,
+        audio: selectedAudioDeviceId
+          ? {
+              deviceId: { exact: selectedAudioDeviceId },
+              channelCount: { ideal: 2 },
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            }
+          : {
+              channelCount: { ideal: 2 },
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            },
+      });
+
+        if (cancelled) {
+          stopStream(stream);
+          return;
+        }
+
+        audioMeterStreamRef.current = stream;
+        const audioContext = new AudioContext();
+        audioMeterAudioContextRef.current = audioContext;
+
+        if (audioContext.state === "suspended") {
+          await audioContext.resume();
+        }
+
+        const source = audioContext.createMediaStreamSource(stream);
+        const inputTrack = stream.getAudioTracks()[0];
+        const inputChannels = inputTrack?.getSettings().channelCount ?? 1;
+        const spectrumAnalyser = audioContext.createAnalyser();
+        spectrumAnalyser.fftSize = 256;
+        spectrumAnalyser.smoothingTimeConstant = 0.22;
+
+        const toLevel = (node: AnalyserNode, buffer: Uint8Array) => {
+          node.getByteTimeDomainData(buffer);
+          let peak = 0;
+          let clipped = false;
+
+          for (const sample of buffer) {
+            const normalized = Math.abs(sample - 128) / 128;
+            if (normalized > peak) {
+              peak = normalized;
+            }
+            if (normalized >= 0.996) {
+              clipped = true;
+            }
+          }
+
+          return {
+            level: clamp(peak * 2.6, 0, 1),
+            clipped,
+          };
+        };
+
+        const silentGain = audioContext.createGain();
+        silentGain.gain.value = 0;
+
+        const leftBuffer = new Uint8Array(128);
+        const rightBuffer = new Uint8Array(128);
+        const spectrumBuffer = new Uint8Array(spectrumAnalyser.frequencyBinCount);
+
+        let leftAnalyser: AnalyserNode;
+        let rightAnalyser: AnalyserNode | null = null;
+
+        source.connect(spectrumAnalyser);
+
+        if (inputChannels > 1) {
+          const splitter = audioContext.createChannelSplitter(2);
+          leftAnalyser = audioContext.createAnalyser();
+          rightAnalyser = audioContext.createAnalyser();
+          leftAnalyser.fftSize = 128;
+          rightAnalyser.fftSize = 128;
+          leftAnalyser.smoothingTimeConstant = 0.02;
+          rightAnalyser.smoothingTimeConstant = 0.02;
+          source.connect(splitter);
+          splitter.connect(leftAnalyser, 0);
+          splitter.connect(rightAnalyser, 1);
+          leftAnalyser.connect(silentGain);
+          rightAnalyser.connect(silentGain);
+        } else {
+          leftAnalyser = audioContext.createAnalyser();
+          leftAnalyser.fftSize = 128;
+          leftAnalyser.smoothingTimeConstant = 0.02;
+          source.connect(leftAnalyser);
+          leftAnalyser.connect(silentGain);
+        }
+
+        silentGain.connect(audioContext.destination);
+
+        const tick = () => {
+          if (cancelled) {
+            return;
+          }
+
+          const rawLeft = toLevel(leftAnalyser, leftBuffer);
+          const rawRight = rightAnalyser ? toLevel(rightAnalyser, rightBuffer) : rawLeft;
+          const prevLevels = audioMeterLevelsRef.current;
+          const smooth = (previous: number, target: number) => {
+            const rise = 0.42;
+            const fall = 0.18;
+            const blend = target >= previous ? rise : fall;
+            return previous + (target - previous) * blend;
+          };
+
+          const leftLevel = smooth(prevLevels.left, rawLeft.level);
+          const rightLevel = smooth(prevLevels.right, rawRight.level);
+
+          audioMeterLevelsRef.current = {
+            left: leftLevel,
+            right: rightLevel,
+          };
+          applyMeterBar(
+            audioMeterLeftBarRef.current,
+            audioMeterLeftGreenRef.current,
+            audioMeterLeftRedRef.current,
+            leftLevel,
+            rawLeft.clipped,
+          );
+          applyMeterBar(
+            audioMeterRightBarRef.current,
+            audioMeterRightGreenRef.current,
+            audioMeterRightRedRef.current,
+            rightLevel,
+            rawRight.clipped,
+          );
+          spectrumAnalyser.getByteFrequencyData(spectrumBuffer);
+          drawRecordSpectrum(
+            recordSpectrumCanvasRef.current,
+            recordControlAnchorRef.current,
+            spectrumBuffer,
+            audioContext.sampleRate,
+          );
+          audioMeterAnimationFrameRef.current = window.requestAnimationFrame(tick);
+        };
+
+        tick();
+      } catch {
+        if (!cancelled) {
+          audioMeterLevelsRef.current = { left: 0, right: 0 };
+          applyMeterBar(
+            audioMeterLeftBarRef.current,
+            audioMeterLeftGreenRef.current,
+            audioMeterLeftRedRef.current,
+            0,
+            false,
+          );
+          applyMeterBar(
+            audioMeterRightBarRef.current,
+            audioMeterRightGreenRef.current,
+            audioMeterRightRedRef.current,
+            0,
+            false,
+          );
+        }
+      }
+    };
+
+    void startMeter();
+
+    return () => {
+      cancelled = true;
+      stopAudioMeter();
+    };
+  }, [audioStatus, isSettingsOpen, recordingStatus, selectedAudioDeviceId, settingsTab]);
 
   useEffect(() => {
     return () => {
@@ -636,6 +1089,14 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem("vinyl-reel-recorder.discogs.token", discogsToken);
   }, [discogsToken]);
+
+  useEffect(() => {
+    window.localStorage.setItem("vinyl-reel-recorder.audio.device", selectedAudioDeviceId);
+  }, [selectedAudioDeviceId]);
+
+  useEffect(() => {
+    window.localStorage.setItem("vinyl-reel-recorder.camera.device", selectedCameraId);
+  }, [selectedCameraId]);
 
   useEffect(() => {
     const username = discogsUsername.trim();
@@ -869,7 +1330,8 @@ function App() {
       const previewBase64 = await invoke<string>("read_file_base64", {
         filePath: savedPath,
       });
-      const previewBlob = base64ToBlob(previewBase64, "video/mp4");
+      const previewMime = savedPath.toLowerCase().endsWith(".webm") ? "video/webm" : "video/mp4";
+      const previewBlob = base64ToBlob(previewBase64, previewMime);
       const previewUrl = URL.createObjectURL(previewBlob);
 
       setRecordingPreviewUrl((current) => {
@@ -912,11 +1374,15 @@ function App() {
     }
 
     const codecCandidates: Array<{ mime: string; format: "mp4" | "webm" }> = [
-      { mime: "video/mp4;codecs=avc1.42E01E", format: "mp4" },
-      { mime: "video/mp4", format: "mp4" },
+      { mime: "video/webm;codecs=vp9,opus", format: "webm" },
+      { mime: "video/webm;codecs=vp8,opus", format: "webm" },
+      { mime: "video/webm;codecs=opus", format: "webm" },
       { mime: "video/webm;codecs=vp9", format: "webm" },
       { mime: "video/webm;codecs=vp8", format: "webm" },
       { mime: "video/webm", format: "webm" },
+      { mime: "video/mp4;codecs=avc1.42E01E,mp4a.40.2", format: "mp4" },
+      { mime: "video/mp4;codecs=avc1.42E01E", format: "mp4" },
+      { mime: "video/mp4", format: "mp4" },
     ];
     const selectedMime = codecCandidates.find((candidate) => MediaRecorder.isTypeSupported(candidate.mime));
 
@@ -936,14 +1402,61 @@ function App() {
       return;
     }
 
+    let audioStream: MediaStream | null = null;
+    let useAudio = true;
+
+    try {
+      audioStream = await navigator.mediaDevices.getUserMedia({
+        video: false,
+        audio: selectedAudioDeviceId
+          ? {
+              deviceId: { exact: selectedAudioDeviceId },
+              channelCount: { ideal: 2 },
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              sampleRate: { ideal: 48000 },
+            }
+          : {
+              channelCount: { ideal: 2 },
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+              sampleRate: { ideal: 48000 },
+            },
+      });
+    } catch (error) {
+      if (audioStatus === "no-device") {
+        useAudio = false;
+        setRecordingNotice("No microphone detected. Recording video only.");
+      } else {
+        const message = friendlyCameraError(error);
+        setRecordingStatus("error");
+        setRecordingNotice(message);
+        return;
+      }
+    }
+
+    const captureTracks = [...sourceStream.getVideoTracks().map((track) => track.clone())];
+    if (useAudio && audioStream) {
+      const audioTrack = audioStream.getAudioTracks()[0];
+      if (audioTrack) {
+        captureTracks.push(audioTrack);
+      }
+    }
+
+    const captureStream = new MediaStream(captureTracks);
+
     let recorder: MediaRecorder;
 
     try {
-      recorder = new MediaRecorder(sourceStream, {
+      recorder = new MediaRecorder(captureStream, {
         mimeType: selectedMime.mime,
         videoBitsPerSecond: RECORDING_VIDEO_BITS_PER_SECOND,
+        audioBitsPerSecond: 256_000,
       });
     } catch (error) {
+      audioStream?.getTracks().forEach((track) => track.stop());
       setRecordingStatus("error");
       setRecordingNotice(
         error instanceof Error ? error.message : "This runtime could not create a recorder.",
@@ -952,15 +1465,19 @@ function App() {
     }
 
     mediaRecorderRef.current = recorder;
-    recordingCaptureStreamRef.current = sourceStream;
+    recordingCaptureStreamRef.current = captureStream;
     setRecordingFormat(selectedMime.format);
     setRecordingPath(null);
     setRecordingStatus("recording");
     startRecordingElapsedTimer();
     setRecordingNotice(
       selectedMime.format === "mp4"
-        ? "Recording as MP4..."
-        : "MP4 is unavailable here, recording as WebM instead...",
+        ? useAudio
+          ? "Recording as MP4 with audio..."
+          : "Recording as MP4 without audio..."
+        : useAudio
+          ? "MP4 is unavailable here, recording as WebM with audio..."
+          : "MP4 is unavailable here, recording as WebM without audio...",
     );
 
     recorder.ondataavailable = (event) => {
@@ -972,7 +1489,8 @@ function App() {
     recorder.onerror = () => {
       clearRecordingTimers();
       clearRecordingElapsed();
-      recordingCaptureStreamRef.current = null;
+      stopRecordingCaptureStream();
+      audioStream?.getTracks().forEach((track) => track.stop());
       setRecordingStatus("error");
       setRecordingNotice("The recorder encountered an error.");
     };
@@ -983,7 +1501,8 @@ function App() {
         : Math.max(recordingElapsedSeconds, 0.1);
 
       clearRecordingTimers();
-      recordingCaptureStreamRef.current = null;
+      stopRecordingCaptureStream();
+      audioStream?.getTracks().forEach((track) => track.stop());
       mediaRecorderRef.current = null;
 
       const recordedBlob = new Blob(recordingChunksRef.current, { type: recorder.mimeType });
@@ -999,9 +1518,13 @@ function App() {
         await saveRecordingBlob(recordedBlob, recordedDurationSeconds);
       } catch (error) {
         setRecordingStatus("error");
-        setRecordingNotice(
-          error instanceof Error ? error.message : "Failed to save the recording.",
-        );
+        const message =
+          error instanceof Error
+            ? error.message
+            : typeof error === "string"
+              ? error
+              : "Failed to save the recording.";
+        setRecordingNotice(message);
       }
     };
 
@@ -1050,6 +1573,33 @@ function App() {
 
   const previewCameraReady = cameraStatus === "ready";
   const previewHasArtwork = Boolean(artworkUrl);
+  const outputPresetOptions = useMemo(
+    () =>
+      OUTPUT_PRESETS.map((preset) => ({
+        value: preset.id,
+        label: preset.label,
+        description: preset.description,
+      })),
+    [],
+  );
+  const cameraDeviceOptions = useMemo(
+    () =>
+      cameraDevices.map((device, index) => ({
+        value: device.deviceId,
+        label: cameraLabel(device, index),
+      })),
+    [cameraDevices],
+  );
+  const audioDeviceOptions = useMemo(
+    () => [
+      { value: "", label: "Default microphone", description: "Use the system default input" },
+      ...audioDevices.map((device, index) => ({
+        value: device.deviceId,
+        label: audioLabel(device, index),
+      })),
+    ],
+    [audioDevices],
+  );
   const recordingActionLabel =
     recordingStatus === "countdown"
       ? "Cancel"
@@ -1065,10 +1615,183 @@ function App() {
       : cameraStatus === "loading"
         ? "Opening preview"
         : cameraStatus === "no-device"
-          ? "No webcam found"
+        ? "No webcam found"
         : cameraStatus === "error"
         ? "Camera needs attention"
         : "Awaiting camera";
+
+  const audioStateLabel =
+    audioStatus === "ready"
+      ? "Microphone ready"
+      : audioStatus === "loading"
+        ? "Checking audio"
+        : audioStatus === "no-device"
+          ? "No microphone found"
+          : audioStatus === "error"
+            ? "Audio needs attention"
+            : "Awaiting audio";
+
+  const applyMeterBar = (
+    barElement: HTMLDivElement | null,
+    greenElement: HTMLDivElement | null,
+    redElement: HTMLDivElement | null,
+    level: number,
+    clipped: boolean,
+  ) => {
+    if (!barElement || !greenElement || !redElement) {
+      return;
+    }
+
+    const safeLevel = clamp(level, 0, 1);
+    const greenThreshold = 0.8;
+    const displayLevel = clipped ? 1 : safeLevel;
+    const filledWidth = Math.max(0, Math.min(100, displayLevel * 100));
+    const greenWidth =
+      clipped || displayLevel <= greenThreshold
+        ? Math.max(0, Math.min(100, displayLevel * 100))
+        : 80;
+    const redWidth = clipped ? 20 : Math.max(0, Math.min(100, filledWidth - greenWidth));
+
+    barElement.style.width = `${filledWidth}%`;
+    barElement.style.display = filledWidth > 0 ? "block" : "none";
+    greenElement.style.width = `${greenWidth}%`;
+    redElement.style.width = `${redWidth}%`;
+    greenElement.style.backgroundColor = "#22c55e";
+    redElement.style.backgroundColor = "#ef4444";
+    greenElement.style.display = greenWidth > 0 ? "block" : "none";
+    redElement.style.display = redWidth > 0 ? "block" : "none";
+  };
+
+  const drawRecordSpectrum = (
+    canvas: HTMLCanvasElement | null,
+    anchor: HTMLDivElement | null,
+    spectrum: Uint8Array,
+    sampleRate: number,
+  ) => {
+    if (!canvas) {
+      return;
+    }
+
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return;
+    }
+
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+
+    const dpr = window.devicePixelRatio || 1;
+    const targetWidth = Math.round(width * dpr);
+    const targetHeight = Math.round(height * dpr);
+
+    if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+    }
+
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = "rgba(2, 6, 23, 0.10)";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    const ringCount = 5;
+    const segmentCount = 24;
+    const noiseFloor = 0.04;
+    const minFrequency = 40;
+    const maxFrequency = 16_000;
+    const logMin = Math.log10(minFrequency);
+    const logMax = Math.log10(maxFrequency);
+
+    const readBand = (position: number) => {
+      const normalizedPosition = clamp(position, 0, 1);
+      const frequency = 10 ** (logMin + (logMax - logMin) * normalizedPosition);
+      const rawIndex = Math.round((frequency / (sampleRate / 2)) * (spectrum.length - 1));
+      const centerIndex = clamp(rawIndex, 0, spectrum.length - 1);
+      const windowRadius = Math.max(1, Math.round(spectrum.length * 0.012));
+      let sum = 0;
+      let count = 0;
+      let localPeak = 0;
+
+      for (
+        let bin = Math.max(0, centerIndex - windowRadius);
+        bin <= Math.min(spectrum.length - 1, centerIndex + windowRadius);
+        bin += 1
+      ) {
+        const value = spectrum[bin] ?? 0;
+        sum += value;
+        count += 1;
+        localPeak = Math.max(localPeak, value);
+      }
+
+      const average = sum / Math.max(1, count);
+      const combined = average * 0.35 + localPeak * 0.65;
+      const baseLevel = clamp(combined / 255, 0, 1);
+      return clamp(Math.pow(Math.max(0, baseLevel - noiseFloor) / (1 - noiseFloor), 0.88), 0, 1);
+    };
+
+    const anchorRect = anchor?.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    const centerX = anchorRect
+      ? (anchorRect.left + anchorRect.width / 2 - canvasRect.left) * dpr
+      : canvas.width / 2;
+    const centerY = anchorRect
+      ? (anchorRect.top + anchorRect.height / 2 - canvasRect.top) * dpr
+      : canvas.height / 2;
+    const maxRadius = Math.min(canvas.width, canvas.height) * 0.42;
+    const minRadius = Math.max(18, maxRadius * 0.28);
+    const ringThickness = (maxRadius - minRadius) / ringCount;
+    const segmentGap = Math.PI / 180 * 1.8;
+    const startAngle = -Math.PI / 2;
+
+    context.save();
+    context.translate(centerX, centerY);
+
+    const inactiveColor = "rgba(103, 100, 109, 0.78)";
+    const innerLitColor = "rgba(245, 245, 244, 0.98)";
+    const midLitColor = "rgba(252, 211, 77, 0.98)";
+    const outerLitColor = "rgba(248, 113, 113, 0.98)";
+
+    for (let ring = 0; ring < ringCount; ring += 1) {
+      const ringOuter = maxRadius - ring * ringThickness;
+      const ringInner = ringOuter - ringThickness * 0.9;
+      const ringWidth = ringOuter - ringInner;
+
+      for (let segment = 0; segment < segmentCount; segment += 1) {
+        const normalized = readBand(segment / Math.max(1, segmentCount - 1));
+        const lit = normalized * ringCount > ringCount - ring - 1;
+        const start = startAngle + (segment / segmentCount) * Math.PI * 2 + segmentGap * 0.5;
+        const end = startAngle + ((segment + 1) / segmentCount) * Math.PI * 2 - segmentGap * 0.5;
+
+        context.beginPath();
+        context.arc(0, 0, ringOuter, start, end);
+        context.arc(0, 0, ringInner, end, start, true);
+        context.closePath();
+        if (lit) {
+          if (ring >= 3) {
+            context.fillStyle = outerLitColor;
+          } else if (ring === 2) {
+            context.fillStyle = midLitColor;
+          } else {
+            context.fillStyle = innerLitColor;
+          }
+        } else {
+          context.fillStyle = inactiveColor;
+        }
+        context.shadowColor = "transparent";
+        context.fill();
+
+        context.beginPath();
+        context.strokeStyle = "rgba(0, 0, 0, 0.35)";
+        context.lineWidth = Math.max(1, ringWidth * 0.12);
+        context.arc(0, 0, ringOuter, start, end);
+        context.stroke();
+      }
+    }
+
+    context.restore();
+  };
 
   const discogsStatusLabel =
     discogsStatus === "loading"
@@ -1176,19 +1899,15 @@ function App() {
                   Portrait Preview
                 </p>
               </div>
-              <label className="flex flex-col items-end gap-1">
-                <select
+              <div className="w-[210px]">
+                <DropdownListbox
+                  items={outputPresetOptions}
                   value={outputPresetId}
-                  onChange={(event) => setOutputPresetId(event.target.value as OutputPresetId)}
-                  className="rounded-full border border-white/10 bg-slate-950/70 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.16em] text-slate-200 outline-none transition focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/20"
-                >
-                  {OUTPUT_PRESETS.map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  onChange={(value) => setOutputPresetId(value as OutputPresetId)}
+                  placeholder="Select output"
+                  className="w-full"
+                />
+              </div>
             </div>
 
             <div className="flex min-h-0 flex-1 items-center justify-center">
@@ -1487,35 +2206,45 @@ function App() {
                   )}
                 </div>
 
-                <section className="mt-2 shrink-0 rounded-[28px] border border-white/10 bg-slate-950/85 px-4 py-4 shadow-2xl shadow-black/40 backdrop-blur">
-                  <div className="flex flex-col items-center gap-3">
-                    <button
-                      type="button"
-                      disabled={recordingStatus === "saving"}
-                      onClick={() => {
-                        if (recordingStatus === "recording") {
-                          stopRecording();
-                          return;
-                        }
+                <section className="relative mt-2 shrink-0 overflow-hidden rounded-[28px] border border-white/10 bg-slate-950/85 px-4 py-4 shadow-2xl shadow-black/40 backdrop-blur">
+                  <div className="pointer-events-none absolute inset-0 opacity-80">
+                    <canvas
+                      ref={recordSpectrumCanvasRef}
+                      className="h-full w-full"
+                    />
+                    <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(245,158,11,0.16),transparent_52%),linear-gradient(180deg,rgba(15,23,42,0.04),rgba(2,6,23,0.72))]" />
+                  </div>
 
-                        void startRecording();
-                      }}
-                      className={[
-                        "flex h-20 w-20 items-center justify-center rounded-full border text-white shadow-[0_0_0_8px_rgba(225,29,72,0.12)] transition",
-                        recordingStatus === "recording"
-                          ? "border-rose-200/40 bg-gradient-to-br from-rose-400 to-red-500 shadow-[0_0_0_10px_rgba(248,113,113,0.16)] animate-pulse"
-                          : "border-rose-300/25 bg-gradient-to-br from-rose-500 to-red-600",
-                        recordingStatus === "saving" ? "cursor-wait opacity-70" : "hover:scale-105",
-                      ].join(" ")}
-                      aria-label="Record"
-                    >
-                      <span className="sr-only">{recordingActionLabel}</span>
-                      {recordingStatus === "recording" ? (
-                        <span className="h-6 w-6 rounded-md bg-white/95 shadow-inner" />
-                      ) : (
-                        <span className="h-8 w-8 rounded-full bg-white/95 shadow-inner" />
-                      )}
-                    </button>
+                  <div className="relative z-10 flex flex-col items-center gap-3">
+                    <div ref={recordControlAnchorRef} className="relative">
+                      <button
+                        type="button"
+                        disabled={recordingStatus === "saving"}
+                        onClick={() => {
+                          if (recordingStatus === "recording") {
+                            stopRecording();
+                            return;
+                          }
+
+                          void startRecording();
+                        }}
+                        className={[
+                          "flex h-20 w-20 items-center justify-center rounded-full border text-white shadow-[0_0_0_8px_rgba(225,29,72,0.12)] transition",
+                          recordingStatus === "recording"
+                            ? "border-rose-200/40 bg-gradient-to-br from-rose-400 to-red-500 shadow-[0_0_0_10px_rgba(248,113,113,0.16)] animate-pulse"
+                            : "border-rose-300/25 bg-gradient-to-br from-rose-500 to-red-600",
+                          recordingStatus === "saving" ? "cursor-wait opacity-70" : "hover:scale-105",
+                        ].join(" ")}
+                        aria-label="Record"
+                      >
+                        <span className="sr-only">{recordingActionLabel}</span>
+                        {recordingStatus === "recording" ? (
+                          <span className="h-6 w-6 rounded-md bg-white/95 shadow-inner" />
+                        ) : (
+                          <span className="h-8 w-8 rounded-full bg-white/95 shadow-inner" />
+                        )}
+                      </button>
+                    </div>
 
                     <div className="text-center">
                       <p className="text-[11px] font-medium uppercase tracking-[0.28em] text-slate-400">
@@ -1715,7 +2444,7 @@ function App() {
               <div>
                 <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Settings</p>
                 <h2 className="mt-1 font-['Space_Grotesk'] text-xl font-semibold text-white">
-                  Camera and Discogs
+                  Camera, audio and Discogs
                 </h2>
               </div>
               <button
@@ -1727,150 +2456,309 @@ function App() {
               </button>
             </div>
 
-            <div className="grid gap-4 p-5 lg:grid-cols-2">
-              <section className="rounded-[28px] border border-white/10 bg-slate-900/70 p-4">
-                <div className="mb-4 flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Camera</p>
-                    <h3 className="mt-1 font-['Space_Grotesk'] text-lg font-semibold text-white">
-                      Webcam selection
-                    </h3>
-                  </div>
+            <div className="flex items-center gap-2 border-b border-white/10 px-5 pt-4">
+              {([
+                ["camera", "Camera"],
+                ["audio", "Audio"],
+                ["discogs", "Discogs"],
+              ] as const).map(([tab, label]) => {
+                const selected = settingsTab === tab;
+                return (
                   <button
+                    key={tab}
                     type="button"
-                    onClick={() => {
-                      void requestCameraAccess();
-                    }}
-                    className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs font-medium text-amber-100 transition hover:border-amber-300/50 hover:bg-amber-400/15"
+                    onClick={() => setSettingsTab(tab)}
+                    className={[
+                      "rounded-t-2xl border border-b-0 px-4 py-3 text-xs font-medium uppercase tracking-[0.22em] transition",
+                      selected
+                        ? "border-amber-400/30 bg-amber-400/10 text-amber-50"
+                        : "border-transparent text-slate-400 hover:border-white/10 hover:bg-white/5 hover:text-slate-200",
+                    ].join(" ")}
                   >
-                    Enable access
+                    {label}
                   </button>
-                </div>
+                );
+              })}
+            </div>
 
-                <label className="block space-y-2">
-                  <span className="text-sm font-medium text-slate-200">Connected webcam</span>
-                  <select
-                    value={selectedCameraId}
-                    onChange={(event) => setSelectedCameraId(event.target.value)}
-                    className="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/20"
-                  >
-                    {cameraDevices.length > 0 ? (
-                      cameraDevices.map((device, index) => (
-                        <option key={device.deviceId} value={device.deviceId}>
-                          {cameraLabel(device, index)}
-                        </option>
-                      ))
-                    ) : (
-                      <option value="">No cameras detected</option>
-                    )}
-                  </select>
-                </label>
-
-                <div className="mt-4 space-y-3 rounded-2xl border border-white/10 bg-white/5 p-3">
-                  <div className="flex items-center justify-between gap-3">
+            <div className="p-5">
+              {settingsTab === "camera" ? (
+                <section className="rounded-[28px] border border-white/10 bg-slate-900/70 p-4">
+                  <div className="mb-4 flex items-start justify-between gap-3">
                     <div>
-                      <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                        Zoom
-                      </p>
-                      <p className="mt-1 text-sm text-slate-100">{cameraZoom.toFixed(2)}x</p>
+                      <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Camera</p>
+                      <h3 className="mt-1 font-['Space_Grotesk'] text-lg font-semibold text-white">
+                        Webcam selection
+                      </h3>
                     </div>
                     <button
                       type="button"
-                      onClick={resetCameraFraming}
-                      className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-amber-400/30 hover:bg-amber-400/10"
+                      onClick={() => {
+                        void requestCameraAccess();
+                      }}
+                      className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs font-medium text-amber-100 transition hover:border-amber-300/50 hover:bg-amber-400/15"
                     >
-                      Reset framing
+                      Enable access
                     </button>
                   </div>
 
-                  <input
-                    type="range"
-                    min="1"
-                    max="2.2"
-                    step="0.01"
-                    value={cameraZoom}
-                    onChange={(event) => setCameraZoom(Number(event.target.value))}
-                    className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-800 accent-amber-400"
-                  />
-                  <div className="flex items-center justify-between text-xs leading-5 text-slate-400">
-                    <span>Zoom in/out before panning.</span>
-                    <span>{cameraZoom.toFixed(2)}x</span>
+                  <label className="block space-y-2">
+                    <span className="text-sm font-medium text-slate-200">Connected webcam</span>
+                    <DropdownListbox
+                      items={
+                        cameraDeviceOptions.length > 0
+                          ? cameraDeviceOptions
+                          : [{ value: "", label: "No cameras detected" }]
+                      }
+                      value={selectedCameraId}
+                      onChange={setSelectedCameraId}
+                      placeholder="Choose a camera"
+                      className="w-full"
+                    />
+                  </label>
+
+                  <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_140px]">
+                    <div className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <div>
+                          <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
+                            Zoom
+                          </p>
+                          <p className="mt-1 text-sm text-slate-100">{cameraZoom.toFixed(2)}x</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={resetCameraFraming}
+                          className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-amber-400/30 hover:bg-amber-400/10"
+                        >
+                          Reset
+                        </button>
+                      </div>
+
+                      <input
+                        type="range"
+                        min="1"
+                        max="2.2"
+                        step="0.01"
+                        value={cameraZoom}
+                        onChange={(event) => setCameraZoom(Number(event.target.value))}
+                        className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-800 accent-amber-400"
+                      />
+                      <div className="flex items-center justify-between text-xs leading-5 text-slate-400">
+                        <span>Zoom in/out before panning.</span>
+                        <span>{cameraZoom.toFixed(2)}x</span>
+                      </div>
+                    </div>
+
+                    <div className="overflow-hidden rounded-[16px] border border-white/10 bg-black shadow-lg shadow-black/25">
+                      <div className="relative aspect-[4/3] bg-slate-950">
+                        <video
+                          ref={settingsCameraPreviewVideoRef}
+                          autoPlay
+                          muted
+                          playsInline
+                          className="absolute inset-0 h-full w-full object-cover"
+                        />
+                        {cameraStatus === "ready" ? (
+                          <div className="absolute left-2 top-2 rounded-full border border-black/25 bg-black/40 px-2 py-0.5 text-[8px] uppercase tracking-[0.18em] text-white/90 backdrop-blur">
+                            Cam
+                          </div>
+                        ) : (
+                          <div className="absolute inset-0 flex items-center justify-center px-3 text-center">
+                            <div className="max-w-[9rem] space-y-1">
+                              <p className="text-[11px] leading-4 text-slate-200">{cameraMessage}</p>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
-                  <p className="text-xs leading-5 text-slate-400">
+
+                  <p className="mt-2 text-xs leading-5 text-slate-400">
                     Drag the live camera preview to place the deck where you want it inside the
                     frame.
                   </p>
-                </div>
 
-                <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                    <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                      Status
-                    </p>
-                    <p className="mt-2 text-sm text-slate-100">{cameraStateLabel}</p>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                    <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                      <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
+                        Status
+                      </p>
+                      <p className="mt-2 text-sm text-slate-100">{cameraStateLabel}</p>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                      <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
+                        Active device
+                      </p>
+                      <p className="mt-2 truncate text-sm text-slate-100">{activeCameraLabel}</p>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                      <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
+                        Negotiated feed
+                      </p>
+                      <p className="mt-2 text-sm text-slate-100">{cameraFeedSummary}</p>
+                    </div>
                   </div>
 
-                  <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                    <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                      Active device
-                    </p>
-                    <p className="mt-2 truncate text-sm text-slate-100">{activeCameraLabel}</p>
+                  <p className="mt-4 text-sm leading-6 text-slate-300">{cameraMessage}</p>
+                  {cameraError ? <p className="mt-2 text-sm text-rose-300">{cameraError}</p> : null}
+                </section>
+              ) : null}
+
+              {settingsTab === "audio" ? (
+                <section className="rounded-[28px] border border-white/10 bg-slate-900/70 p-4">
+                  <div className="mb-4 flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Audio</p>
+                      <h3 className="mt-1 font-['Space_Grotesk'] text-lg font-semibold text-white">
+                        Microphone selection
+                      </h3>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void requestAudioAccess();
+                      }}
+                      className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs font-medium text-amber-100 transition hover:border-amber-300/50 hover:bg-amber-400/15"
+                    >
+                      Enable access
+                    </button>
                   </div>
 
-                  <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                    <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                      Negotiated feed
-                    </p>
-                    <p className="mt-2 text-sm text-slate-100">{cameraFeedSummary}</p>
-                  </div>
-                </div>
-
-                <p className="mt-4 text-sm leading-6 text-slate-300">{cameraMessage}</p>
-                {cameraError ? <p className="mt-2 text-sm text-rose-300">{cameraError}</p> : null}
-              </section>
-
-              <section className="rounded-[28px] border border-white/10 bg-slate-900/70 p-4">
-                <div className="mb-4 flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Discogs</p>
-                    <h3 className="mt-1 font-['Space_Grotesk'] text-lg font-semibold text-white">
-                      Username and token
-                    </h3>
-                  </div>
-                  <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.28em] text-slate-300">
-                    {discogsStatusLabel}
-                  </div>
-                </div>
-
-                <div className="space-y-3">
                   <label className="block space-y-2">
-                    <span className="text-sm font-medium text-slate-200">Discogs username</span>
-                    <input
-                      type="text"
-                      value={discogsUsername}
-                      onChange={(event) => setDiscogsUsername(event.target.value)}
-                      placeholder="your-discogs-handle"
-                      className="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/20"
+                    <span className="text-sm font-medium text-slate-200">Connected microphone</span>
+                    <DropdownListbox
+                      items={audioDeviceOptions}
+                      value={selectedAudioDeviceId}
+                      onChange={setSelectedAudioDeviceId}
+                      placeholder="Choose a microphone"
+                      className="w-full"
                     />
                   </label>
 
-                  <label className="block space-y-2">
-                    <span className="text-sm font-medium text-slate-200">Personal access token</span>
-                    <input
-                      type="password"
-                      value={discogsToken}
-                      onChange={(event) => setDiscogsToken(event.target.value)}
-                      placeholder="Discogs token"
-                      className="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/20"
-                    />
-                  </label>
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+                      <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
+                        Status
+                      </p>
+                      <p className="mt-2 text-sm text-slate-100">{audioStateLabel}</p>
+                    </div>
 
-                  <p className="text-sm leading-6 text-slate-300">
-                    Credentials are stored locally on this device. Use the sidebar to load and
-                    browse your collection.
-                  </p>
-                </div>
-              </section>
+                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3">
+                      <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
+                        Active device
+                      </p>
+                      <p className="mt-2 truncate text-sm text-slate-100">{activeAudioLabel}</p>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 rounded-[24px] border border-white/10 bg-black/35 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-[10px] uppercase tracking-[0.32em] text-slate-500">
+                        VU meter
+                      </p>
+                    </div>
+
+                    <div className="mt-3 space-y-2">
+                      <div className="grid grid-cols-[auto_1fr] items-center gap-2">
+                        <span className="text-[10px] uppercase tracking-[0.24em] text-slate-500">
+                          L
+                        </span>
+                        <div className="relative h-4 overflow-hidden rounded-full bg-slate-800">
+                          <div
+                            ref={audioMeterLeftBarRef}
+                            className="absolute inset-y-0 left-0 flex overflow-hidden rounded-full"
+                          >
+                            <div
+                              ref={audioMeterLeftGreenRef}
+                              className="h-full shrink-0 rounded-full"
+                            />
+                            <div
+                              ref={audioMeterLeftRedRef}
+                              className="h-full shrink-0 rounded-full"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-[auto_1fr] items-center gap-2">
+                        <span className="text-[10px] uppercase tracking-[0.24em] text-slate-500">
+                          R
+                        </span>
+                        <div className="relative h-4 overflow-hidden rounded-full bg-slate-800">
+                          <div
+                            ref={audioMeterRightBarRef}
+                            className="absolute inset-y-0 left-0 flex overflow-hidden rounded-full"
+                          >
+                            <div
+                              ref={audioMeterRightGreenRef}
+                              className="h-full shrink-0 rounded-full"
+                            />
+                            <div
+                              ref={audioMeterRightRedRef}
+                              className="h-full shrink-0 rounded-full"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <p className="mt-2 text-xs leading-5 text-slate-400">
+                      Play something or speak into the selected microphone to confirm the input.
+                    </p>
+                  </div>
+
+                  <p className="mt-4 text-sm leading-6 text-slate-300">{audioMessage}</p>
+                  {audioError ? <p className="mt-2 text-sm text-rose-300">{audioError}</p> : null}
+                </section>
+              ) : null}
+
+              {settingsTab === "discogs" ? (
+                <section className="rounded-[28px] border border-white/10 bg-slate-900/70 p-4">
+                  <div className="mb-4 flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Discogs</p>
+                      <h3 className="mt-1 font-['Space_Grotesk'] text-lg font-semibold text-white">
+                        Username and token
+                      </h3>
+                    </div>
+                    <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.28em] text-slate-300">
+                      {discogsStatusLabel}
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="block space-y-2">
+                      <span className="text-sm font-medium text-slate-200">Discogs username</span>
+                      <input
+                        type="text"
+                        value={discogsUsername}
+                        onChange={(event) => setDiscogsUsername(event.target.value)}
+                        placeholder="your-discogs-handle"
+                        className="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/20"
+                      />
+                    </label>
+
+                    <label className="block space-y-2">
+                      <span className="text-sm font-medium text-slate-200">Personal access token</span>
+                      <input
+                        type="password"
+                        value={discogsToken}
+                        onChange={(event) => setDiscogsToken(event.target.value)}
+                        placeholder="Discogs token"
+                        className="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/20"
+                      />
+                    </label>
+
+                    <p className="text-sm leading-6 text-slate-300">
+                      Credentials are stored locally on this device. Use the sidebar to load and
+                      browse your collection.
+                    </p>
+                  </div>
+                </section>
+              ) : null}
             </div>
           </div>
         </div>
