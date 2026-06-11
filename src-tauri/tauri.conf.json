@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Vinyl Reel Recorder",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "com.stevepodmore.vinylreelrecorder",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -25,6 +25,7 @@
   },
   "bundle": {
     "active": true,
+    "externalBin": ["binaries/ffmpeg"],
     "targets": "all",
     "icon": [
       "icons/32x32.png",

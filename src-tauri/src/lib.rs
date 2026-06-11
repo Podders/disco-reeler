@@ -7,7 +7,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{window::Color, AppHandle, Emitter, Manager, TitleBarStyle};
+use tauri::{window::Color, AppHandle, Emitter, Manager};
+#[cfg(target_os = "macos")]
+use tauri::TitleBarStyle;
+use tauri_plugin_shell::ShellExt;
 use base64::Engine as _;
 
 const APP_USER_AGENT: &str = "Vinyl Reel Recorder/0.1.0";
@@ -533,6 +536,7 @@ async fn read_file_base64(file_path: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn encode_recording_with_ffmpeg(
+    app_handle: AppHandle,
     file_name: String,
     base64_data: String,
     artwork_data_url: Option<String>,
@@ -540,188 +544,166 @@ async fn encode_recording_with_ffmpeg(
     output_width: u32,
     output_height: u32,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let bytes = decode_base64_input(&base64_data)?;
+    let bytes = decode_base64_input(&base64_data)?;
 
-        let temp_dir = temp_recording_dir();
-        fs::create_dir_all(&temp_dir)
-            .map_err(|error| format!("Failed to create FFmpeg temp directory: {error}"))?;
+    let temp_dir = temp_recording_dir();
+    fs::create_dir_all(&temp_dir)
+        .map_err(|error| format!("Failed to create FFmpeg temp directory: {error}"))?;
 
-        let input_path = unique_recording_source_path();
-        fs::write(&input_path, bytes)
-            .map_err(|error| format!("Failed to write temporary recording: {error}"))?;
+    let input_path = unique_recording_source_path();
+    fs::write(&input_path, bytes)
+        .map_err(|error| format!("Failed to write temporary recording: {error}"))?;
 
-        let downloads = downloads_dir()
-            .ok_or_else(|| "Could not locate the Downloads folder.".to_string())?;
-        let target_dir = downloads.join("Vinyl Reel Recorder");
-        fs::create_dir_all(&target_dir)
-            .map_err(|error| format!("Failed to create recording folder: {error}"))?;
+    let downloads = downloads_dir().ok_or_else(|| "Could not locate the Downloads folder.".to_string())?;
+    let target_dir = downloads.join("Vinyl Reel Recorder");
+    fs::create_dir_all(&target_dir)
+        .map_err(|error| format!("Failed to create recording folder: {error}"))?;
 
-        let output_path = target_dir.join(recording_output_file_name(&file_name));
-        let output_width = output_width.max(1);
-        let output_height = output_height.max(1);
-        let is_landscape_layout = output_width > output_height;
-        let camera_section_height = if output_height <= 1 {
-            1
-        } else {
-            ((output_height as f64) * 120.0 / 271.0)
-                .round()
-                .clamp(1.0, (output_height - 1) as f64) as u32
-        };
-        let artwork_section_height = output_height - camera_section_height;
-        let camera_section_width = if output_width <= 1 {
-            1
-        } else {
-            output_width / 2
-        };
-        let artwork_section_width = output_width.saturating_sub(camera_section_width);
-        let mut command = Command::new("ffmpeg");
-        command
-            .arg("-y")
-            .arg("-hide_banner")
-            .arg("-loglevel")
-            .arg("error")
-            .arg("-i")
-            .arg(&input_path);
+    let output_path = target_dir.join(recording_output_file_name(&file_name));
+    let output_width = output_width.max(1);
+    let output_height = output_height.max(1);
+    let is_landscape_layout = output_width > output_height;
+    let camera_section_height = if output_height <= 1 {
+        1
+    } else {
+        ((output_height as f64) * 120.0 / 271.0)
+            .round()
+            .clamp(1.0, (output_height - 1) as f64) as u32
+    };
+    let artwork_section_height = output_height - camera_section_height;
+    let camera_section_width = if output_width <= 1 {
+        1
+    } else {
+        output_width / 2
+    };
+    let artwork_section_width = output_width.saturating_sub(camera_section_width);
+    let mut artwork_path: Option<PathBuf> = None;
 
-        let mut artwork_path: Option<PathBuf> = None;
+    let mut ffmpeg_args: Vec<String> = vec![
+        "-y".to_string(),
+        "-hide_banner".to_string(),
+        "-loglevel".to_string(),
+        "error".to_string(),
+        "-i".to_string(),
+        input_path.to_string_lossy().to_string(),
+    ];
 
-        if let Some(artwork_data_url) = artwork_data_url.as_deref() {
-            let (artwork_bytes, mime) = decode_data_url(artwork_data_url)?;
-            let extension = extension_for_mime(mime.as_deref());
-            let path = unique_temp_asset_path(extension);
-            fs::write(&path, artwork_bytes)
-                .map_err(|error| format!("Failed to write temporary artwork image: {error}"))?;
-            command.arg("-loop").arg("1").arg("-i").arg(&path);
-            artwork_path = Some(path);
-        }
+    if let Some(artwork_data_url) = artwork_data_url.as_deref() {
+        let (artwork_bytes, mime) = decode_data_url(artwork_data_url)?;
+        let extension = extension_for_mime(mime.as_deref());
+        let path = unique_temp_asset_path(extension);
+        fs::write(&path, artwork_bytes)
+            .map_err(|error| format!("Failed to write temporary artwork image: {error}"))?;
+        ffmpeg_args.push("-loop".to_string());
+        ffmpeg_args.push("1".to_string());
+        ffmpeg_args.push("-i".to_string());
+        ffmpeg_args.push(path.to_string_lossy().to_string());
+        artwork_path = Some(path);
+    }
 
-        let duration_seconds = duration_seconds.max(0.1);
-
-        let filter_complex = if is_landscape_layout {
-            if artwork_path.is_some() {
-                let artwork_crop = format!(
-                    "crop={artwork_section_width}:{output_height}:0:0"
-                );
-                format!(
-                    "[0:v]fps=60,scale={camera_section_width}:{output_height}:force_original_aspect_ratio=increase,crop={camera_section_width}:{output_height},setsar=1[left];[1:v]scale={artwork_section_width}:{output_height}:force_original_aspect_ratio=increase,{artwork_crop},setsar=1[right];[left][right]hstack=inputs=2,format=yuv420p[v]"
-                )
-            } else {
-                format!(
-                    "[0:v]fps=60,scale={camera_section_width}:{output_height}:force_original_aspect_ratio=increase,crop={camera_section_width}:{output_height},setsar=1[left];color=c=black:s={artwork_section_width}x{output_height}:r=60[right];[left][right]hstack=inputs=2,format=yuv420p[v]"
-                )
-            }
-        } else if artwork_path.is_some() {
-            let artwork_crop = format!(
-                "crop={output_width}:{artwork_section_height}:(iw-ow)/2:0"
-            );
+    let duration_seconds = duration_seconds.max(0.1);
+    let filter_complex = if is_landscape_layout {
+        if artwork_path.is_some() {
+            let artwork_crop = format!("crop={artwork_section_width}:{output_height}:0:0");
             format!(
-                "[0:v]fps=60,scale={output_width}:{camera_section_height}:force_original_aspect_ratio=increase,crop={output_width}:{camera_section_height},setsar=1[top];[1:v]scale={output_width}:{artwork_section_height}:force_original_aspect_ratio=increase,{artwork_crop},setsar=1[bottom];[top][bottom]vstack=inputs=2,format=yuv420p[v]"
+                "[0:v]fps=60,scale={camera_section_width}:{output_height}:force_original_aspect_ratio=increase,crop={camera_section_width}:{output_height},setsar=1[left];[1:v]scale={artwork_section_width}:{output_height}:force_original_aspect_ratio=increase,{artwork_crop},setsar=1[right];[left][right]hstack=inputs=2,format=yuv420p[v]"
             )
         } else {
             format!(
-                "[0:v]fps=60,scale={output_width}:{camera_section_height}:force_original_aspect_ratio=increase,crop={output_width}:{camera_section_height},setsar=1[top];color=c=black:s={output_width}x{artwork_section_height}:r=60[bottom];[top][bottom]vstack=inputs=2,format=yuv420p[v]"
+                "[0:v]fps=60,scale={camera_section_width}:{output_height}:force_original_aspect_ratio=increase,crop={camera_section_width}:{output_height},setsar=1[left];color=c=black:s={artwork_section_width}x{output_height}:r=60[right];[left][right]hstack=inputs=2,format=yuv420p[v]"
             )
-        };
-
-        command
-            .arg("-t")
-            .arg(format!("{duration_seconds:.3}"))
-            .arg("-filter_complex")
-            .arg(filter_complex)
-            .arg("-map")
-            .arg("[v]")
-            .arg("-map")
-            .arg("0:a?")
-            .arg("-shortest")
-            .arg("-c:v")
-            .arg("libx264")
-            .arg("-preset")
-            .arg("veryfast")
-            .arg("-crf")
-            .arg("18")
-            .arg("-c:a")
-            .arg("aac")
-            .arg("-ac")
-            .arg("2")
-            .arg("-ar")
-            .arg("48000")
-            .arg("-b:a")
-            .arg("192k")
-            .arg("-movflags")
-            .arg("+faststart")
-            .arg(&output_path);
-
-        let ffmpeg_output = command.output();
-
-        let cleanup_result = fs::remove_file(&input_path);
-
-        if let Err(error) = cleanup_result {
-            if output_path.exists() {
-                let _ = fs::remove_file(&output_path);
-            }
-            if let Some(path) = artwork_path.as_ref() {
-                let _ = fs::remove_file(path);
-            }
-
-            return Err(format!("Failed to clean up temporary recording: {error}"));
         }
+    } else if artwork_path.is_some() {
+        let artwork_crop = format!("crop={output_width}:{artwork_section_height}:(iw-ow)/2:0");
+        format!(
+            "[0:v]fps=60,scale={output_width}:{camera_section_height}:force_original_aspect_ratio=increase,crop={output_width}:{camera_section_height},setsar=1[top];[1:v]scale={output_width}:{artwork_section_height}:force_original_aspect_ratio=increase,{artwork_crop},setsar=1[bottom];[top][bottom]vstack=inputs=2,format=yuv420p[v]"
+        )
+    } else {
+        format!(
+            "[0:v]fps=60,scale={output_width}:{camera_section_height}:force_original_aspect_ratio=increase,crop={output_width}:{camera_section_height},setsar=1[top];color=c=black:s={output_width}x{artwork_section_height}:r=60[bottom];[top][bottom]vstack=inputs=2,format=yuv420p[v]"
+        )
+    };
 
-        let output = match ffmpeg_output {
-            Ok(output) => output,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if let Some(path) = artwork_path.as_ref() {
-                    let _ = fs::remove_file(path);
-                }
-                return Err(
-                    "FFmpeg was not found in PATH. Install FFmpeg to enable native MP4 export."
-                        .to_string(),
-                );
-            }
-            Err(error) => {
-                if output_path.exists() {
-                    let _ = fs::remove_file(&output_path);
-                }
-                if let Some(path) = artwork_path.as_ref() {
-                    let _ = fs::remove_file(path);
-                }
+    ffmpeg_args.push("-t".to_string());
+    ffmpeg_args.push(format!("{duration_seconds:.3}"));
+    ffmpeg_args.push("-filter_complex".to_string());
+    ffmpeg_args.push(filter_complex);
+    ffmpeg_args.push("-map".to_string());
+    ffmpeg_args.push("[v]".to_string());
+    ffmpeg_args.push("-map".to_string());
+    ffmpeg_args.push("0:a?".to_string());
+    ffmpeg_args.push("-shortest".to_string());
+    ffmpeg_args.push("-c:v".to_string());
+    ffmpeg_args.push("libx264".to_string());
+    ffmpeg_args.push("-preset".to_string());
+    ffmpeg_args.push("veryfast".to_string());
+    ffmpeg_args.push("-crf".to_string());
+    ffmpeg_args.push("18".to_string());
+    ffmpeg_args.push("-c:a".to_string());
+    ffmpeg_args.push("aac".to_string());
+    ffmpeg_args.push("-ac".to_string());
+    ffmpeg_args.push("2".to_string());
+    ffmpeg_args.push("-ar".to_string());
+    ffmpeg_args.push("48000".to_string());
+    ffmpeg_args.push("-b:a".to_string());
+    ffmpeg_args.push("192k".to_string());
+    ffmpeg_args.push("-movflags".to_string());
+    ffmpeg_args.push("+faststart".to_string());
+    ffmpeg_args.push(output_path.to_string_lossy().to_string());
 
-                return Err(format!("Failed to launch FFmpeg: {error}"));
-            }
-        };
+    let output = app_handle
+        .shell()
+        .sidecar("ffmpeg")
+        .map_err(|error| format!("FFmpeg sidecar is unavailable: {error}"))?
+        .args(ffmpeg_args)
+        .output()
+        .await
+        .map_err(|error| format!("Failed to launch FFmpeg sidecar: {error}"))?;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .to_string();
-
-            if output_path.exists() {
-                let _ = fs::remove_file(&output_path);
-            }
-            if let Some(path) = artwork_path.as_ref() {
-                let _ = fs::remove_file(path);
-            }
-
-            let details = if stderr.is_empty() {
-                format!(
-                    "FFmpeg failed to encode the recording (exit code {}).",
-                    output.status.code().map(|code| code.to_string()).unwrap_or_else(|| "unknown".to_string())
-                )
-            } else {
-                format!("FFmpeg failed to encode the recording: {stderr}")
-            };
-
-            return Err(details);
+    if let Err(error) = fs::remove_file(&input_path) {
+        if output_path.exists() {
+            let _ = fs::remove_file(&output_path);
         }
-
         if let Some(path) = artwork_path.as_ref() {
             let _ = fs::remove_file(path);
         }
 
-        Ok(output_path.to_string_lossy().to_string())
-    })
-    .await
-    .map_err(|error| format!("Failed to join FFmpeg task: {error}"))?
+        return Err(format!("Failed to clean up temporary recording: {error}"));
+    }
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .to_string();
+
+        if output_path.exists() {
+            let _ = fs::remove_file(&output_path);
+        }
+        if let Some(path) = artwork_path.as_ref() {
+            let _ = fs::remove_file(path);
+        }
+
+        let details = if stderr.is_empty() {
+            format!(
+                "FFmpeg failed to encode the recording (exit code {}).",
+                output
+                    .status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
+        } else {
+            format!("FFmpeg failed to encode the recording: {stderr}")
+        };
+
+        return Err(details);
+    }
+
+    if let Some(path) = artwork_path.as_ref() {
+        let _ = fs::remove_file(path);
+    }
+
+    Ok(output_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -737,6 +719,7 @@ async fn open_containing_folder(file_path: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_background_color(Some(Color(4, 7, 12, 255)));
