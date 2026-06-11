@@ -8,6 +8,9 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
+import { DiscogsPanel } from "./components/DiscogsPanel";
+import { SettingsDialog } from "./components/SettingsDialog";
+
 type DurationChoice = 15 | 30 | 60 | 90;
 type CameraStatus = "idle" | "loading" | "ready" | "no-device" | "error";
 type AudioStatus = CameraStatus;
@@ -175,6 +178,13 @@ function loadStoredValue(key: string) {
   return window.localStorage.getItem(key) ?? "";
 }
 
+function loadStoredNumber(key: string, fallback: number) {
+  const raw = loadStoredValue(key);
+  const value = Number(raw);
+
+  return Number.isFinite(value) ? value : fallback;
+}
+
 function cameraLabel(device: MediaDeviceInfo, index: number) {
   return device.label.trim() || `Camera ${index + 1}`;
 }
@@ -319,12 +329,20 @@ function App() {
   );
   const [audioError, setAudioError] = useState<string | null>(null);
   const [deviceRefreshTick, setDeviceRefreshTick] = useState(0);
-  const [cameraZoom, setCameraZoom] = useState(1.15);
-  const [cameraPan, setCameraPan] = useState({ x: 0, y: 0 });
+  const [cameraZoom, setCameraZoom] = useState(() =>
+    loadStoredNumber("vinyl-reel-recorder.camera.zoom", 1.15),
+  );
+  const [cameraPan, setCameraPan] = useState(() => ({
+    x: loadStoredNumber("vinyl-reel-recorder.camera.pan.x", 0),
+    y: loadStoredNumber("vinyl-reel-recorder.camera.pan.y", 0),
+  }));
   const [isCameraViewportHovered, setIsCameraViewportHovered] = useState(false);
   const [cameraFeedSummary, setCameraFeedSummary] = useState("Awaiting camera details.");
 
-  const [duration, setDuration] = useState<DurationChoice | null>(30);
+  const [duration, setDuration] = useState<DurationChoice | null>(() => {
+    const stored = Number(loadStoredValue("vinyl-reel-recorder.duration"));
+    return [15, 30, 60, 90].includes(stored) ? (stored as DurationChoice) : 30;
+  });
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus>("idle");
   const [recordingCountdown, setRecordingCountdown] = useState<number | null>(null);
   const [recordingElapsedSeconds, setRecordingElapsedSeconds] = useState(0);
@@ -362,7 +380,12 @@ function App() {
   );
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<"camera" | "audio" | "discogs">("camera");
-  const [outputPresetId, setOutputPresetId] = useState<OutputPresetId>("vertical");
+  const [outputPresetId, setOutputPresetId] = useState<OutputPresetId>(() => {
+    const stored = loadStoredValue("vinyl-reel-recorder.output.preset");
+    return stored === "square" || stored === "landscape" || stored === "vertical"
+      ? stored
+      : "vertical";
+  });
   const discogsCacheLoadedForUserRef = useRef<string | null>(null);
 
   const activeCameraLabel = useMemo(() => {
@@ -828,15 +851,6 @@ function App() {
       return undefined;
     }
 
-    if (
-      recordingStatus === "countdown" ||
-      recordingStatus === "recording" ||
-      recordingStatus === "saving"
-    ) {
-      stopAudioMeter();
-      return undefined;
-    }
-
     let cancelled = false;
 
     const startMeter = async () => {
@@ -1096,6 +1110,26 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem("vinyl-reel-recorder.camera.device", selectedCameraId);
   }, [selectedCameraId]);
+
+  useEffect(() => {
+    window.localStorage.setItem("vinyl-reel-recorder.camera.zoom", String(cameraZoom));
+  }, [cameraZoom]);
+
+  useEffect(() => {
+    window.localStorage.setItem("vinyl-reel-recorder.camera.pan.x", String(cameraPan.x));
+  }, [cameraPan.x]);
+
+  useEffect(() => {
+    window.localStorage.setItem("vinyl-reel-recorder.camera.pan.y", String(cameraPan.y));
+  }, [cameraPan.y]);
+
+  useEffect(() => {
+    window.localStorage.setItem("vinyl-reel-recorder.duration", String(duration ?? ""));
+  }, [duration]);
+
+  useEffect(() => {
+    window.localStorage.setItem("vinyl-reel-recorder.output.preset", outputPresetId);
+  }, [outputPresetId]);
 
   useEffect(() => {
     const username = discogsUsername.trim();
@@ -1569,7 +1603,6 @@ function App() {
       OUTPUT_PRESETS.map((preset) => ({
         value: preset.id,
         label: preset.label,
-        description: preset.description,
       })),
     [],
   );
@@ -1858,27 +1891,6 @@ function App() {
         <div className="absolute right-[-8%] top-[20%] h-96 w-96 rounded-full bg-cyan-400/10 blur-3xl" />
         <div className="absolute bottom-[-18%] left-[18%] h-80 w-80 rounded-full bg-fuchsia-500/10 blur-3xl" />
       </div>
-
-      <button
-        type="button"
-        onClick={() => setIsSettingsOpen(true)}
-        aria-label="Open settings"
-        className="fixed right-3 top-3 z-30 inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-slate-950/70 text-slate-200 shadow-2xl shadow-black/30 backdrop-blur transition hover:border-amber-400/30 hover:bg-amber-400/10"
-      >
-        <svg
-          aria-hidden="true"
-          viewBox="0 0 24 24"
-          className="h-5 w-5"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.8"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <circle cx="12" cy="12" r="3.25" />
-          <path d="M19.4 15a1.5 1.5 0 0 0 .3 1.65l.05.05a1.8 1.8 0 0 1 0 2.55l-.7.7a1.8 1.8 0 0 1-2.55 0l-.05-.05A1.5 1.5 0 0 0 15 19.4a1.5 1.5 0 0 0-1 .95V21a1.8 1.8 0 0 1-1.8 1.8h-1.4A1.8 1.8 0 0 1 9 21v-.65a1.5 1.5 0 0 0-1-.95 1.5 1.5 0 0 0-1.65.3l-.05.05a1.8 1.8 0 0 1-2.55 0l-.7-.7a1.8 1.8 0 0 1 0-2.55l.05-.05a1.5 1.5 0 0 0 .3-1.65A1.5 1.5 0 0 0 1.6 14H1a1.8 1.8 0 0 1-1.8-1.8v-1.4A1.8 1.8 0 0 1 1 9h.6a1.5 1.5 0 0 0 .95-1 1.5 1.5 0 0 0-.3-1.65l-.05-.05a1.8 1.8 0 0 1 0-2.55l.7-.7a1.8 1.8 0 0 1 2.55 0l.05.05A1.5 1.5 0 0 0 6.6 3.6 1.5 1.5 0 0 0 7.55 2.65V2A1.8 1.8 0 0 1 9.35.2h1.3A1.8 1.8 0 0 1 12.45 2v.65a1.5 1.5 0 0 0 .95.95 1.5 1.5 0 0 0 1.65-.3l.05-.05a1.8 1.8 0 0 1 2.55 0l.7.7a1.8 1.8 0 0 1 0 2.55l-.05.05a1.5 1.5 0 0 0-.3 1.65 1.5 1.5 0 0 0 .95 1H23a1.8 1.8 0 0 1 1.8 1.8v1.4A1.8 1.8 0 0 1 23 14h-.65a1.5 1.5 0 0 0-.95 1Z" />
-        </svg>
-      </button>
 
       <div className="relative mx-auto flex h-[calc(100dvh-1rem)] max-w-[1680px] flex-col gap-3 overflow-hidden">
 
@@ -2279,133 +2291,26 @@ function App() {
           </div>
 
           <aside className="flex min-h-0 flex-col gap-3">
-            <section className="flex h-full min-h-0 flex-col rounded-[28px] border border-white/10 bg-slate-950/75 p-3 shadow-2xl shadow-black/30 backdrop-blur">
-              <div className="mb-3 flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Discogs</p>
-                  <h3 className="mt-1 font-['Space_Grotesk'] text-lg font-semibold text-white">
-                    Browse collection
-                  </h3>
-                </div>
-                <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.28em] text-slate-300">
-                  {discogsStatusLabel}
-                </div>
-              </div>
-
-              <div className="space-y-2.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    void loadDiscogsCollection();
-                  }}
-                  disabled={discogsStatus === "loading"}
-                  className="w-full rounded-2xl border border-amber-400/30 bg-amber-400/10 px-4 py-3 text-sm font-medium text-amber-50 transition hover:border-amber-300/50 hover:bg-amber-400/15 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {discogsStatus === "loading"
-                    ? "Loading Discogs collection..."
-                    : "Connect and load"}
-                </button>
-
-                {discogsStatus === "loading" ? (
-                  <div className="space-y-2 rounded-2xl border border-white/10 bg-slate-900/70 px-4 py-3">
-                    <div className="flex items-center justify-between gap-3 text-xs uppercase tracking-[0.28em] text-slate-500">
-                      <span>
-                        {discogsProgress?.status === "starting" ? "Connecting" : "Loading pages"}
-                      </span>
-                      <span>
-                        {discogsProgress?.page ?? 0}
-                        {discogsProgress?.pages ? ` / ${discogsProgress.pages}` : " / ?"} pages
-                      </span>
-                    </div>
-                    <div className="h-2 overflow-hidden rounded-full bg-slate-800">
-                      <div
-                        className="h-full rounded-full bg-gradient-to-r from-amber-400 via-orange-300 to-amber-200 transition-[width] duration-300"
-                        style={{ width: `${discogsProgressPercent}%` }}
-                      />
-                    </div>
-                    <div className="flex items-center justify-between gap-3 text-xs text-slate-400">
-                      <span>{discogsProgress?.loaded_releases ?? 0} releases loaded</span>
-                      <span>
-                        {discogsProgress?.total_releases
-                          ? `${discogsProgress.total_releases} total`
-                          : "Counting collection"}
-                      </span>
-                    </div>
-                  </div>
-                ) : null}
-
-                <p className="text-sm leading-6 text-slate-300">{discogsNotice}</p>
-                {discogsError ? <p className="text-sm text-rose-300">{discogsError}</p> : null}
-              </div>
-
-              <div className="mt-3 flex min-h-0 flex-1 flex-col space-y-2.5 rounded-2xl border border-white/10 bg-white/5 p-2.5">
-                <label className="block space-y-2">
-                  <span className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                    Search collection
-                  </span>
-                  <input
-                    type="search"
-                    value={discogsFilter}
-                    onChange={(event) => setDiscogsFilter(event.target.value)}
-                    placeholder="Filter by artist, title, year or label"
-                    className="w-full rounded-2xl border border-white/10 bg-slate-900 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/20"
-                  />
-                </label>
-
-                <div className="flex items-center justify-between gap-3 text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                  <span>{filteredDiscogsReleases.length} visible</span>
-                  <span>{discogsReleases.length} total</span>
-                </div>
-
-                <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-                  {filteredDiscogsReleases.length > 0 ? (
-                    filteredDiscogsReleases.map((release) => {
-                      const selected = release.instance_id === selectedDiscogsReleaseId;
-                      const artwork = release.cover_image ?? release.thumb;
-
-                      return (
-                        <button
-                          key={release.instance_id}
-                          type="button"
-                          onClick={() => {
-                            void useDiscogsArtwork(release);
-                          }}
-                          className={[
-                            "flex w-full items-center gap-3 rounded-2xl border p-2 text-left transition",
-                            selected
-                              ? "border-amber-400/45 bg-amber-400/12"
-                              : "border-white/10 bg-slate-900/80 hover:border-amber-400/30 hover:bg-amber-400/10",
-                          ].join(" ")}
-                        >
-                          <div className="h-14 w-14 shrink-0 overflow-hidden rounded-xl border border-white/10 bg-slate-800">
-                            {artwork ? (
-                              <img src={artwork} alt="" className="h-full w-full object-cover" />
-                            ) : null}
-                          </div>
-
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-sm font-semibold text-white">
-                              {release.artist}
-                            </div>
-                            <div className="truncate text-sm text-slate-300">{release.title}</div>
-                            <div className="mt-1 flex flex-wrap gap-2 text-[11px] uppercase tracking-[0.22em] text-slate-500">
-                              {release.year ? <span>{release.year}</span> : null}
-                              {release.label ? <span>{release.label}</span> : null}
-                            </div>
-                          </div>
-                        </button>
-                      );
-                    })
-                  ) : (
-                    <div className="rounded-2xl border border-dashed border-white/10 bg-slate-900/70 px-4 py-6 text-sm text-slate-400">
-                      {discogsStatus === "ready"
-                        ? "No collection releases match this filter."
-                        : "Load your Discogs collection to see releases here."}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </section>
+            <DiscogsPanel
+              status={discogsStatus}
+              statusLabel={discogsStatusLabel}
+              progress={discogsProgress}
+              progressPercent={discogsProgressPercent}
+              notice={discogsNotice}
+              error={discogsError}
+              filter={discogsFilter}
+              onFilterChange={setDiscogsFilter}
+              visibleCount={filteredDiscogsReleases.length}
+              totalCount={discogsReleases.length}
+              releases={filteredDiscogsReleases}
+              selectedReleaseId={selectedDiscogsReleaseId}
+              onLoad={() => {
+                void loadDiscogsCollection();
+              }}
+              onSelectRelease={(release) => {
+                void useDiscogsArtwork(release);
+              }}
+            />
           </aside>
         </section>
 
@@ -2416,343 +2321,62 @@ function App() {
           height={outputHeight}
         />
 
-        <footer className="rounded-[24px] border border-white/10 bg-slate-950/60 px-5 py-4 text-sm text-slate-400 shadow-2xl shadow-black/20 backdrop-blur">
+        <footer className="flex items-center justify-between gap-4 rounded-[24px] border border-white/10 bg-slate-950/60 px-5 py-4 text-sm text-slate-400 shadow-2xl shadow-black/20 backdrop-blur">
           <p>Preview snapshot: camera preview, artwork and duration controls.</p>
+          <button
+            type="button"
+            onClick={() => setIsSettingsOpen(true)}
+            aria-label="Open settings"
+            className="shrink-0 rounded-full border border-transparent bg-transparent px-0 py-0 text-sm font-medium text-slate-200 underline decoration-white/25 underline-offset-4 transition hover:text-amber-100 hover:decoration-amber-300/70"
+          >
+            Settings
+          </button>
         </footer>
       </div>
 
       {isSettingsOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 py-6 backdrop-blur-sm">
-          <button
-            type="button"
-            aria-label="Close settings"
-            className="absolute inset-0 cursor-default"
-            onClick={() => setIsSettingsOpen(false)}
-          />
-
-          <div className="relative z-10 w-full max-w-4xl overflow-hidden rounded-[32px] border border-white/10 bg-slate-950 shadow-2xl shadow-black/60">
-            <div className="flex items-center justify-between gap-4 border-b border-white/10 px-5 py-4">
-              <div>
-                <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Settings</p>
-                <h2 className="mt-1 font-['Space_Grotesk'] text-xl font-semibold text-white">
-                  Camera, audio and Discogs
-                </h2>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsSettingsOpen(false)}
-                className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-xs font-medium uppercase tracking-[0.22em] text-slate-200 transition hover:border-amber-400/30 hover:bg-amber-400/10"
-              >
-                Close
-              </button>
-            </div>
-
-            <div className="flex items-center gap-2 border-b border-white/10 px-5 pt-4">
-              {([
-                ["camera", "Camera"],
-                ["audio", "Audio"],
-                ["discogs", "Discogs"],
-              ] as const).map(([tab, label]) => {
-                const selected = settingsTab === tab;
-                return (
-                  <button
-                    key={tab}
-                    type="button"
-                    onClick={() => setSettingsTab(tab)}
-                    className={[
-                      "rounded-t-2xl border border-b-0 px-4 py-3 text-xs font-medium uppercase tracking-[0.22em] transition",
-                      selected
-                        ? "border-amber-400/30 bg-amber-400/10 text-amber-50"
-                        : "border-transparent text-slate-400 hover:border-white/10 hover:bg-white/5 hover:text-slate-200",
-                    ].join(" ")}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="p-5">
-              {settingsTab === "camera" ? (
-                <section className="rounded-[28px] border border-white/10 bg-slate-900/70 p-4">
-                  <div className="mb-4 flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Camera</p>
-                      <h3 className="mt-1 font-['Space_Grotesk'] text-lg font-semibold text-white">
-                        Webcam selection
-                      </h3>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void requestCameraAccess();
-                      }}
-                      className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs font-medium text-amber-100 transition hover:border-amber-300/50 hover:bg-amber-400/15"
-                    >
-                      Enable access
-                    </button>
-                  </div>
-
-                  <label className="block space-y-2">
-                    <span className="text-sm font-medium text-slate-200">Connected webcam</span>
-                    <DropdownListbox
-                      items={
-                        cameraDeviceOptions.length > 0
-                          ? cameraDeviceOptions
-                          : [{ value: "", label: "No cameras detected" }]
-                      }
-                      value={selectedCameraId}
-                      onChange={setSelectedCameraId}
-                      placeholder="Choose a camera"
-                      className="w-full"
-                    />
-                  </label>
-
-                  <div className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_140px]">
-                    <div className="space-y-3 rounded-2xl border border-white/10 bg-white/5 p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div>
-                          <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                            Zoom
-                          </p>
-                          <p className="mt-1 text-sm text-slate-100">{cameraZoom.toFixed(2)}x</p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={resetCameraFraming}
-                          className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-amber-400/30 hover:bg-amber-400/10"
-                        >
-                          Reset
-                        </button>
-                      </div>
-
-                      <input
-                        type="range"
-                        min="1"
-                        max="2.2"
-                        step="0.01"
-                        value={cameraZoom}
-                        onChange={(event) => setCameraZoom(Number(event.target.value))}
-                        className="h-2 w-full cursor-pointer appearance-none rounded-full bg-slate-800 accent-amber-400"
-                      />
-                      <div className="flex items-center justify-between text-xs leading-5 text-slate-400">
-                        <span>Zoom in/out before panning.</span>
-                        <span>{cameraZoom.toFixed(2)}x</span>
-                      </div>
-                    </div>
-
-                    <div className="overflow-hidden rounded-[16px] border border-white/10 bg-black shadow-lg shadow-black/25">
-                      <div className="relative aspect-[4/3] bg-slate-950">
-                        <video
-                          ref={settingsCameraPreviewVideoRef}
-                          autoPlay
-                          muted
-                          playsInline
-                          className="absolute inset-0 h-full w-full object-cover"
-                        />
-                        {cameraStatus === "ready" ? (
-                          <div className="absolute left-2 top-2 rounded-full border border-black/25 bg-black/40 px-2 py-0.5 text-[8px] uppercase tracking-[0.18em] text-white/90 backdrop-blur">
-                            Cam
-                          </div>
-                        ) : (
-                          <div className="absolute inset-0 flex items-center justify-center px-3 text-center">
-                            <div className="max-w-[9rem] space-y-1">
-                              <p className="text-[11px] leading-4 text-slate-200">{cameraMessage}</p>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  <p className="mt-2 text-xs leading-5 text-slate-400">
-                    Drag the live camera preview to place the deck where you want it inside the
-                    frame.
-                  </p>
-
-                  <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                    <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                      <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                        Status
-                      </p>
-                      <p className="mt-2 text-sm text-slate-100">{cameraStateLabel}</p>
-                    </div>
-
-                    <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                      <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                        Active device
-                      </p>
-                      <p className="mt-2 truncate text-sm text-slate-100">{activeCameraLabel}</p>
-                    </div>
-
-                    <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                      <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                        Negotiated feed
-                      </p>
-                      <p className="mt-2 text-sm text-slate-100">{cameraFeedSummary}</p>
-                    </div>
-                  </div>
-
-                  <p className="mt-4 text-sm leading-6 text-slate-300">{cameraMessage}</p>
-                  {cameraError ? <p className="mt-2 text-sm text-rose-300">{cameraError}</p> : null}
-                </section>
-              ) : null}
-
-              {settingsTab === "audio" ? (
-                <section className="rounded-[28px] border border-white/10 bg-slate-900/70 p-4">
-                  <div className="mb-4 flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Audio</p>
-                      <h3 className="mt-1 font-['Space_Grotesk'] text-lg font-semibold text-white">
-                        Microphone selection
-                      </h3>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void requestAudioAccess();
-                      }}
-                      className="rounded-full border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs font-medium text-amber-100 transition hover:border-amber-300/50 hover:bg-amber-400/15"
-                    >
-                      Enable access
-                    </button>
-                  </div>
-
-                  <label className="block space-y-2">
-                    <span className="text-sm font-medium text-slate-200">Connected microphone</span>
-                    <DropdownListbox
-                      items={audioDeviceOptions}
-                      value={selectedAudioDeviceId}
-                      onChange={setSelectedAudioDeviceId}
-                      placeholder="Choose a microphone"
-                      className="w-full"
-                    />
-                  </label>
-
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3">
-                      <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                        Status
-                      </p>
-                      <p className="mt-2 text-sm text-slate-100">{audioStateLabel}</p>
-                    </div>
-
-                    <div className="rounded-2xl border border-white/10 bg-slate-950/60 p-3">
-                      <p className="text-[10px] uppercase tracking-[0.28em] text-slate-500">
-                        Active device
-                      </p>
-                      <p className="mt-2 truncate text-sm text-slate-100">{activeAudioLabel}</p>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 rounded-[24px] border border-white/10 bg-black/35 p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-[10px] uppercase tracking-[0.32em] text-slate-500">
-                        VU meter
-                      </p>
-                    </div>
-
-                    <div className="mt-3 space-y-2">
-                      <div className="grid grid-cols-[auto_1fr] items-center gap-2">
-                        <span className="text-[10px] uppercase tracking-[0.24em] text-slate-500">
-                          L
-                        </span>
-                        <div className="relative h-4 overflow-hidden rounded-full bg-slate-800">
-                          <div
-                            ref={audioMeterLeftBarRef}
-                            className="absolute inset-y-0 left-0 flex overflow-hidden rounded-full"
-                          >
-                            <div
-                              ref={audioMeterLeftGreenRef}
-                              className="h-full shrink-0 rounded-full"
-                            />
-                            <div
-                              ref={audioMeterLeftRedRef}
-                              className="h-full shrink-0 rounded-full"
-                            />
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-[auto_1fr] items-center gap-2">
-                        <span className="text-[10px] uppercase tracking-[0.24em] text-slate-500">
-                          R
-                        </span>
-                        <div className="relative h-4 overflow-hidden rounded-full bg-slate-800">
-                          <div
-                            ref={audioMeterRightBarRef}
-                            className="absolute inset-y-0 left-0 flex overflow-hidden rounded-full"
-                          >
-                            <div
-                              ref={audioMeterRightGreenRef}
-                              className="h-full shrink-0 rounded-full"
-                            />
-                            <div
-                              ref={audioMeterRightRedRef}
-                              className="h-full shrink-0 rounded-full"
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <p className="mt-2 text-xs leading-5 text-slate-400">
-                      Play something or speak into the selected microphone to confirm the input.
-                    </p>
-                  </div>
-
-                  <p className="mt-4 text-sm leading-6 text-slate-300">{audioMessage}</p>
-                  {audioError ? <p className="mt-2 text-sm text-rose-300">{audioError}</p> : null}
-                </section>
-              ) : null}
-
-              {settingsTab === "discogs" ? (
-                <section className="rounded-[28px] border border-white/10 bg-slate-900/70 p-4">
-                  <div className="mb-4 flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-xs uppercase tracking-[0.35em] text-slate-400">Discogs</p>
-                      <h3 className="mt-1 font-['Space_Grotesk'] text-lg font-semibold text-white">
-                        Username and token
-                      </h3>
-                    </div>
-                    <div className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.28em] text-slate-300">
-                      {discogsStatusLabel}
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    <label className="block space-y-2">
-                      <span className="text-sm font-medium text-slate-200">Discogs username</span>
-                      <input
-                        type="text"
-                        value={discogsUsername}
-                        onChange={(event) => setDiscogsUsername(event.target.value)}
-                        placeholder="your-discogs-handle"
-                        className="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/20"
-                      />
-                    </label>
-
-                    <label className="block space-y-2">
-                      <span className="text-sm font-medium text-slate-200">Personal access token</span>
-                      <input
-                        type="password"
-                        value={discogsToken}
-                        onChange={(event) => setDiscogsToken(event.target.value)}
-                        placeholder="Discogs token"
-                        className="w-full rounded-2xl border border-white/10 bg-slate-950 px-4 py-3 text-sm text-slate-100 outline-none transition placeholder:text-slate-500 focus:border-amber-400/50 focus:ring-2 focus:ring-amber-400/20"
-                      />
-                    </label>
-
-                    <p className="text-sm leading-6 text-slate-300">
-                      Credentials are stored locally on this device. Use the sidebar to load and
-                      browse your collection.
-                    </p>
-                  </div>
-                </section>
-              ) : null}
-            </div>
-          </div>
-        </div>
+        <SettingsDialog
+          settingsTab={settingsTab}
+          onClose={() => setIsSettingsOpen(false)}
+          onChangeTab={setSettingsTab}
+          onEnableCameraAccess={() => {
+            void requestCameraAccess();
+          }}
+          onEnableAudioAccess={() => {
+            void requestAudioAccess();
+          }}
+          onResetCameraFraming={resetCameraFraming}
+          cameraDeviceOptions={cameraDeviceOptions}
+          selectedCameraId={selectedCameraId}
+          onCameraChange={setSelectedCameraId}
+          cameraZoom={cameraZoom}
+          onCameraZoomChange={setCameraZoom}
+          cameraStatus={cameraStatus}
+          cameraMessage={cameraMessage}
+          cameraError={cameraError}
+          cameraStateLabel={cameraStateLabel}
+          activeCameraLabel={activeCameraLabel}
+          cameraFeedSummary={cameraFeedSummary}
+          settingsCameraPreviewVideoRef={settingsCameraPreviewVideoRef}
+          audioDeviceOptions={audioDeviceOptions}
+          selectedAudioDeviceId={selectedAudioDeviceId}
+          onAudioChange={setSelectedAudioDeviceId}
+          audioMessage={audioMessage}
+          audioError={audioError}
+          audioStateLabel={audioStateLabel}
+          activeAudioLabel={activeAudioLabel}
+          audioMeterLeftBarRef={audioMeterLeftBarRef}
+          audioMeterLeftGreenRef={audioMeterLeftGreenRef}
+          audioMeterLeftRedRef={audioMeterLeftRedRef}
+          audioMeterRightBarRef={audioMeterRightBarRef}
+          audioMeterRightGreenRef={audioMeterRightGreenRef}
+          audioMeterRightRedRef={audioMeterRightRedRef}
+          discogsStatusLabel={discogsStatusLabel}
+          discogsUsername={discogsUsername}
+          onDiscogsUsernameChange={setDiscogsUsername}
+          discogsToken={discogsToken}
+          onDiscogsTokenChange={setDiscogsToken}
+        />
       ) : null}
 
       {isRecordingPreviewOpen && recordingPath ? (
@@ -2788,20 +2412,19 @@ function App() {
                   <video
                     ref={recordingPreviewVideoRef}
                     src={recordingPreviewSrc}
-                    className="block h-full w-full bg-black object-contain"
-                    controls
-                  playsInline
-                  preload="metadata"
-                  onLoadedMetadata={(event) => {
-                    const video = event.currentTarget;
-                    setRecordingPreviewDuration(video.duration || 0);
-                    setRecordingPreviewTime(video.currentTime || 0);
-                  }}
-                  onTimeUpdate={(event) => {
-                    const video = event.currentTarget;
-                    setRecordingPreviewTime(video.currentTime || 0);
-                  }}
-                />
+                    className="no-native-video-ui block h-full w-full bg-black object-contain"
+                    playsInline
+                    preload="metadata"
+                    onLoadedMetadata={(event) => {
+                      const video = event.currentTarget;
+                      setRecordingPreviewDuration(video.duration || 0);
+                      setRecordingPreviewTime(video.currentTime || 0);
+                    }}
+                    onTimeUpdate={(event) => {
+                      const video = event.currentTarget;
+                      setRecordingPreviewTime(video.currentTime || 0);
+                    }}
+                  />
                 </div>
               </div>
 

@@ -59,3 +59,12 @@ select {
   background: rgba(245, 158, 11, 0.35);
   color: #f8fafc;
 }
+
+.no-native-video-ui::-webkit-media-controls,
+.no-native-video-ui::-webkit-media-controls-enclosure,
+.no-native-video-ui::-webkit-media-controls-panel,
+.no-native-video-ui::-webkit-media-controls-play-button,
+.no-native-video-ui::-webkit-media-controls-start-playback-button {
+  display: none !important;
+  -webkit-appearance: none;
+}
