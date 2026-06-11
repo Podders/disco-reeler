@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  font-family: "IBM Plex Sans", sans-serif;
+  --app-background: #04070c;
+  --app-chrome: #04070c;
+  background:
+    radial-gradient(circle at top, rgba(255, 184, 77, 0.16), transparent 30%),
+    radial-gradient(circle at 80% 20%, rgba(20, 184, 166, 0.14), transparent 28%),
+    linear-gradient(180deg, #071018 0%, var(--app-background) 100%);
+  color: #e8eef5;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-text-size-adjust: 100%;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: var(--app-background);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 56px;
+  background: var(--app-chrome);
+  pointer-events: none;
+  z-index: 0;
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(245, 158, 11, 0.35);
+  color: #f8fafc;
+}
