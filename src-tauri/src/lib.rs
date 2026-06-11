@@ -543,6 +543,9 @@ async fn encode_recording_with_ffmpeg(
     duration_seconds: f64,
     output_width: u32,
     output_height: u32,
+    camera_zoom: f64,
+    camera_pan_x: f64,
+    camera_pan_y: f64,
 ) -> Result<String, String> {
     let bytes = decode_base64_input(&base64_data)?;
 
@@ -563,6 +566,9 @@ async fn encode_recording_with_ffmpeg(
     let output_width = output_width.max(1);
     let output_height = output_height.max(1);
     let is_landscape_layout = output_width > output_height;
+    let camera_zoom = camera_zoom.max(1.0);
+    let camera_pan_x = camera_pan_x.clamp(-28.0, 28.0);
+    let camera_pan_y = camera_pan_y.clamp(-28.0, 28.0);
     let camera_section_height = if output_height <= 1 {
         1
     } else {
@@ -578,6 +584,14 @@ async fn encode_recording_with_ffmpeg(
     };
     let artwork_section_width = output_width.saturating_sub(camera_section_width);
     let mut artwork_path: Option<PathBuf> = None;
+    let zoomed_camera_width = ((camera_section_width as f64) * camera_zoom).ceil().max(1.0) as u32;
+    let zoomed_camera_height = ((camera_section_height as f64) * camera_zoom).ceil().max(1.0) as u32;
+    let camera_pan_x_expr = format!(
+        "(iw-ow)/2-((iw-ow)/2*({camera_pan_x}/28.0))"
+    );
+    let camera_pan_y_expr = format!(
+        "(ih-oh)/2-((ih-oh)/2*({camera_pan_y}/28.0))"
+    );
 
     let mut ffmpeg_args: Vec<String> = vec![
         "-y".to_string(),
@@ -606,21 +620,21 @@ async fn encode_recording_with_ffmpeg(
         if artwork_path.is_some() {
             let artwork_crop = format!("crop={artwork_section_width}:{output_height}:0:0");
             format!(
-                "[0:v]fps=60,scale={camera_section_width}:{output_height}:force_original_aspect_ratio=increase,crop={camera_section_width}:{output_height},setsar=1[left];[1:v]scale={artwork_section_width}:{output_height}:force_original_aspect_ratio=increase,{artwork_crop},setsar=1[right];[left][right]hstack=inputs=2,format=yuv420p[v]"
+                "[0:v]fps=60,scale={zoomed_camera_width}:{zoomed_camera_height}:force_original_aspect_ratio=increase,crop={camera_section_width}:{output_height}:{camera_pan_x_expr}:{camera_pan_y_expr},setsar=1[left];[1:v]scale={artwork_section_width}:{output_height}:force_original_aspect_ratio=increase,{artwork_crop},setsar=1[right];[left][right]hstack=inputs=2,format=yuv420p[v]"
             )
         } else {
             format!(
-                "[0:v]fps=60,scale={camera_section_width}:{output_height}:force_original_aspect_ratio=increase,crop={camera_section_width}:{output_height},setsar=1[left];color=c=black:s={artwork_section_width}x{output_height}:r=60[right];[left][right]hstack=inputs=2,format=yuv420p[v]"
+                "[0:v]fps=60,scale={zoomed_camera_width}:{zoomed_camera_height}:force_original_aspect_ratio=increase,crop={camera_section_width}:{output_height}:{camera_pan_x_expr}:{camera_pan_y_expr},setsar=1[left];color=c=black:s={artwork_section_width}x{output_height}:r=60[right];[left][right]hstack=inputs=2,format=yuv420p[v]"
             )
         }
     } else if artwork_path.is_some() {
         let artwork_crop = format!("crop={output_width}:{artwork_section_height}:(iw-ow)/2:0");
         format!(
-            "[0:v]fps=60,scale={output_width}:{camera_section_height}:force_original_aspect_ratio=increase,crop={output_width}:{camera_section_height},setsar=1[top];[1:v]scale={output_width}:{artwork_section_height}:force_original_aspect_ratio=increase,{artwork_crop},setsar=1[bottom];[top][bottom]vstack=inputs=2,format=yuv420p[v]"
+            "[0:v]fps=60,scale={zoomed_camera_width}:{zoomed_camera_height}:force_original_aspect_ratio=increase,crop={output_width}:{camera_section_height}:{camera_pan_x_expr}:{camera_pan_y_expr},setsar=1[top];[1:v]scale={output_width}:{artwork_section_height}:force_original_aspect_ratio=increase,{artwork_crop},setsar=1[bottom];[top][bottom]vstack=inputs=2,format=yuv420p[v]"
         )
     } else {
         format!(
-            "[0:v]fps=60,scale={output_width}:{camera_section_height}:force_original_aspect_ratio=increase,crop={output_width}:{camera_section_height},setsar=1[top];color=c=black:s={output_width}x{artwork_section_height}:r=60[bottom];[top][bottom]vstack=inputs=2,format=yuv420p[v]"
+            "[0:v]fps=60,scale={zoomed_camera_width}:{zoomed_camera_height}:force_original_aspect_ratio=increase,crop={output_width}:{camera_section_height}:{camera_pan_x_expr}:{camera_pan_y_expr},setsar=1[top];color=c=black:s={output_width}x{artwork_section_height}:r=60[bottom];[top][bottom]vstack=inputs=2,format=yuv420p[v]"
         )
     };
 

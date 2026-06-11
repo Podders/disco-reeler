@@ -6,7 +6,7 @@ import {
   ListboxOptions,
 } from "@headlessui/react";
 import { listen } from "@tauri-apps/api/event";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 
 type DurationChoice = 15 | 30 | 60 | 90;
 type CameraStatus = "idle" | "loading" | "ready" | "no-device" | "error";
@@ -332,7 +332,6 @@ function App() {
     "Recording is ready once a webcam is active.",
   );
   const [recordingPath, setRecordingPath] = useState<string | null>(null);
-  const [recordingFormat, setRecordingFormat] = useState<"mp4" | "webm">("mp4");
   const [recordingPreviewUrl, setRecordingPreviewUrl] = useState<string | null>(null);
   const [isRecordingPreviewOpen, setIsRecordingPreviewOpen] = useState(false);
   const [recordingPreviewTime, setRecordingPreviewTime] = useState(0);
@@ -1296,37 +1295,20 @@ function App() {
 
   const saveRecordingBlob = async (blob: Blob, durationSeconds: number) => {
     const base64Data = await blobToBase64(blob);
-    let savedPath: string;
 
     try {
       setRecordingNotice("Encoding with FFmpeg...");
-      savedPath = await invoke<string>("encode_recording_with_ffmpeg", {
+      const savedPath = await invoke<string>("encode_recording_with_ffmpeg", {
         fileName: `${makeRecordingFileName()}.mp4`,
         base64Data,
         artworkDataUrl: artworkUrl,
         durationSeconds,
         outputWidth,
         outputHeight,
+        cameraZoom,
+        cameraPanX: cameraPan.x,
+        cameraPanY: cameraPan.y,
       });
-      setRecordingFormat("mp4");
-    } catch (error) {
-      const message =
-        typeof error === "string"
-          ? error
-          : error instanceof Error
-            ? error.message
-            : error && typeof error === "object" && "message" in error
-              ? String((error as { message?: unknown }).message ?? "FFmpeg export failed.")
-              : "FFmpeg export failed.";
-
-      setRecordingNotice(`${message} Saving the browser recording instead.`);
-      savedPath = await invoke<string>("save_recording_file", {
-        fileName: `${makeRecordingFileName()}.${recordingFormat}`,
-        base64Data,
-      });
-    }
-
-    try {
       const previewBase64 = await invoke<string>("read_file_base64", {
         filePath: savedPath,
       });
@@ -1341,13 +1323,23 @@ function App() {
 
         return previewUrl;
       });
-    } catch {
-      setRecordingPreviewUrl(convertFileSrc(savedPath));
-    }
+      setRecordingPath(savedPath);
+      setRecordingNotice("Recording saved successfully.");
+      setRecordingStatus("saved");
+    } catch (error) {
+      const message =
+        typeof error === "string"
+          ? error
+          : error instanceof Error
+            ? error.message
+            : error && typeof error === "object" && "message" in error
+              ? String((error as { message?: unknown }).message ?? "FFmpeg export failed.")
+              : "FFmpeg export failed.";
 
-    setRecordingPath(savedPath);
-    setRecordingNotice("Recording saved successfully.");
-    setRecordingStatus("saved");
+      setRecordingStatus("error");
+      setRecordingNotice(message);
+      throw error instanceof Error ? error : new Error(message);
+    }
   };
 
   const stopRecording = () => {
@@ -1466,7 +1458,6 @@ function App() {
 
     mediaRecorderRef.current = recorder;
     recordingCaptureStreamRef.current = captureStream;
-    setRecordingFormat(selectedMime.format);
     setRecordingPath(null);
     setRecordingStatus("recording");
     startRecordingElapsedTimer();
